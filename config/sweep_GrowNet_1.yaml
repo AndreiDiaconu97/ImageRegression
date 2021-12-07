@@ -1,0 +1,29 @@
+project: image_compression_grownet
+WANDB_DIR: "../runs"
+program: ImageRegression_GrowNet.py
+
+method: random
+metric:
+  goal: maximize
+  name: Summary/Ensemble_psnr
+name: model_nn_grownet_simple
+parameters:
+  epochs_per_stage:
+    value: 50
+  epochs_per_correction:
+    value: 50
+  optimizer:
+    values: [ adam, adamW, sgd ]
+  lr_model:
+    distribution: log_uniform
+    min: -11.5129255
+    max: -2.30258509
+  lr_ensemble:
+    distribution: log_uniform
+    min: -11.5129255
+    max: -2.30258509
+
+
+#early_terminate:
+#  type: hyperband
+#  min_iter: 3

@@ -1,0 +1,33 @@
+project: image_compression
+WANDB_DIR: "../runs"
+program: ImageRegression.py
+
+method: random
+metric:
+  goal: minimize
+  name: loss
+name: model_NN
+parameters:
+  epochs:
+    value: 100
+  model:
+    value: nn
+  optimizer:
+    values: [ adam, adamW, sgd ]
+  lr:
+    distribution: log_uniform
+    min: -9.21034037
+    max: -4.60517019
+  batch_size:
+    distribution: q_log_uniform
+    min: 6.90775528
+    max: 10.3089527
+    q: 1
+  B_scale:
+    distribution: uniform
+    min: 0.01
+    max: 0.1
+
+early_terminate:
+  type: hyperband
+  min_iter: 3

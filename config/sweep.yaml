@@ -1,0 +1,28 @@
+project: image_compression
+WANDB_DIR: "../runs"
+program: ImageRegression.py
+method: random
+metric:
+  goal: minimize
+  name: loss
+name: my_sweep
+parameters:
+  epochs:
+    value: 20
+  lr:
+    distribution: log_uniform
+    min: -11.5129255
+    max: -2.30258509
+  optimizer:
+    values: [ adam, adamW, sgd ]
+  model:
+    values: [ gon, nn ]
+  batch_size:
+    distribution: q_log_uniform
+    min: 6.2146081
+    max: 9.21034037
+    q: 1
+  B_scale:
+    distribution: log_uniform
+    min: -6.90775528
+    max: 0
