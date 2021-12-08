@@ -1,6 +1,5 @@
 import numpy as np
 import torch
-
 from utils import BatchSamplingMode
 
 # Ensure deterministic behavior
@@ -30,7 +29,6 @@ def init_P(P, image):
 
 
 hparams_grownet = {
-    "type": "grownet",
     "B_scale": 0.03,
     "acc_gradients": False,
     "batch_sampling_mode": BatchSamplingMode.whole.name,
@@ -47,11 +45,10 @@ hparams_grownet = {
     "model": 'siren',
     "num_nets": 50,
     "optimizer": 'adamW',
-    "scale": 0.1
+    "scale": 0.1,
 }
 
 hparams_base = {
-    "type": "base",
     "B_scale": 0.0676,
     "acc_gradients": False,
     "batch_sampling_mode": BatchSamplingMode.nth_element.name,
@@ -63,23 +60,22 @@ hparams_base = {
     "lr": 0.000728,  # [0.01, 0.0001],
     "model": 'siren',
     "optimizer": 'adamW',
-    "scale": 0.1
+    "scale": 0.1,
 }
 
 hparams_xgboost = {
-    "type": "xgboost",
-    'eval_metric': ['mae', 'rmse'],
-    'learning_rate': 0.6,
-    'max_depth': 12,
-    'n_estimators': 800,
-    'num_parallel_tree': 1,
+    'B_scale': 0.03,
+    'eval_metric': ['rmse'],  # 'mae'
+    'input_layer_size': 16 * 2,
+    'lambda': 1,
+    'learning_rate': 1.0,
+    'max_depth': 7,
+    # 'n_estimators': 10000,
+    'num_boost_round': 10000,
+    # 'num_parallel_tree': 4, # for CPU?
+    'tree_method': 'gpu_hist',
     'objective': 'reg:squarederror',
     'reg_lambda': 0.01,
     'scale': 0.1,
-    'seed': 0,
-    'subsample': 1.0,
-    'tree_method': 'gpu_hist',
-    'verbosity': 2
+    'subsample': 1,
 }
-
-# TODO: prepare best default version for each script. use .py or .yaml?

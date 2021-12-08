@@ -1,64 +1,94 @@
-from config.default import OUT_ROOT, init_P, INPUT_PATH
-from sklearn.multioutput import MultiOutputRegressor
-from utils import BatchSamplingMode, batch_generator_in_memory, input_mapping, image_preprocess
+from config.default import OUT_ROOT, init_P, INPUT_PATH, hparams_xgboost
+from torchmetrics.functional import ssim
+from utils import batch_generator_in_memory, input_mapping, image_preprocess, get_psnr
+from xgboost import callback
 import cv2
-import enum
 import numpy as np
-import random
 import time
 import torch
+import wandb
 import xgboost as xgb
 
-device = 'cpu'
+early_stop_execution = callback.early_stop(10)  # raise EarlyStopException(best_iteration)
+
+
+def metrics_R_callback(channel):
+    xgtrain = xgtrains[channel]
+
+    def callback(env):
+        _l = time.time()
+        if _l - l["time"] > 1:  # save metrics every second
+            l["time"] = _l
+            ypred = torch.from_numpy(env.model.predict(xgtrain))
+            y = torch.from_numpy(xgtrain.get_label())
+            mse = env.evaluation_result_list[0][1] ** 2
+            psnr = get_psnr(ypred, y)
+            _ssim = ssim(ypred.view(1, 1, h, w), y.view(1, 1, h, w))
+
+            wandb.log({
+                "loss": mse,
+                "psnr": psnr,
+                "ssim": _ssim,
+            })
+
+    return callback
+
 
 if __name__ == '__main__':
     start = time.time()
-
-    P = {
-        "B_scale": 0.02,
-        "hidden_size": 16,
-        "batch_sampling_mode": BatchSamplingMode.whole.name,
-        "scale": 0.1
-    }
+    # SETUP #
+    l = {'time': time.time()}
+    WANDB_USER = "a-di"
+    WANDB_MODE = "online"  # ["online", "offline", "disabled"]
+    P = hparams_xgboost
 
     image = cv2.imread(INPUT_PATH)
-    image = image_preprocess(image, P).to(device)
-    cv2.imwrite(OUT_ROOT + '/sample.png', image.cpu().numpy() * 255)
+    image = image_preprocess(image, P)
+    cv2.imwrite(OUT_ROOT + '/sample.png', image.numpy() * 255)
+    P["image_shape"] = image.shape
+    h, w, channels = P["image_shape"]
 
-    init_P(P, image)
-    h, w, channels = P["input_shape"]
-
-    batches = batch_generator_in_memory(P, device, shuffle=True)
-    B = P["B_scale"] * torch.randn((P["hidden_size"], 2)).to(device)
-
-    # train = xgb.DMatrix(batches[0], label=image.view(-1, 3))
-
-    params = {
-        'max_depth': 3,
-        'learning_rate': 0.6,
-        'subsample': 1.0,
-        'objective': 'reg:squarederror',
-        'tree_method': 'gpu_hist',
-        'verbosity': 2,
-        'num_parallel_tree': 1,
-        'eval_metric': ['mae', 'rmse'],
-        'seed': 0,
-        'n_estimators': 800,
-        'reg_lambda': 0.01,
+    batches = batch_generator_in_memory(P, 'cpu', shuffle=False)
+    B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2))
+    xtrain = input_mapping(batches[0], B)
+    xgtrains = {
+        "R": xgb.DMatrix(xtrain, label=image.view(-1, channels)[:, 0]),
+        "G": xgb.DMatrix(xtrain, label=image.view(-1, channels)[:, 1]),
+        "B": xgb.DMatrix(xtrain, label=image.view(-1, channels)[:, 2])
     }
-    # booster = xgb.train(param, train, num_boost_round=10)
 
-    xtrain = input_mapping(batches[0].to(device), B)
-    ytrain = image.view(-1, 3)
-    model = MultiOutputRegressor(xgb.XGBRegressor(**params))
-    model.fit(xtrain, ytrain)
-    score = model.score(xtrain, ytrain)
-    print("Training score: ", score)
+    # TRAIN #
+    wandb_run = wandb.init(project="image_regression_final", entity=WANDB_USER, dir="../out", config=P, tags=["xgboost"], mode=WANDB_MODE)  # id="2"
+    channels_pred = {"R": None, "G": None, "B": None}
+    for c in channels_pred:
+        model = xgb.train(P, xgtrains[c], num_boost_round=P["num_boost_round"], evals=[(xgtrains[c], 'Train')], verbose_eval=False,
+                          callbacks=[metrics_R_callback(c), early_stop_execution])
+        channels_pred[c] = model.predict(xgtrains[c])
+        # pred_img = torch.Tensor(channels_pred[c]).view(h, w, 1).numpy()
+        # cv2.imwrite(OUT_ROOT + f'/xgboost_{c}.png', (pred_img * 255))
 
-    ypred = model.predict(xtrain)
-    pred_img = torch.Tensor(ypred).view(h, w, channels).numpy()
+    ypred_RGB = torch.tensor(np.asarray([channels_pred[c] for c in channels_pred])).permute((1, 0))
+    y = image.view(-1, channels)
 
-    cv2.imwrite(OUT_ROOT + f'/xgboost_test.png', (pred_img * 255))
+    # LOG summary metrics #
+    mse = torch.mean((ypred_RGB - y) ** 2)
+    psnr = get_psnr(ypred_RGB, y)
+    _ssim = ssim(ypred_RGB.reshape(1, channels, h, w), y.view(1, channels, h, w))
+    wandb.log({
+        "Final/loss": mse,
+        "Final/psnr": psnr,
+        "Final/ssim": _ssim,
+    })
+
+    # save output #
+    pred_img = ypred_RGB.view(h, w, channels).numpy()
+    cv2.imwrite(OUT_ROOT + f'/xgboost_RGB.png', (pred_img * 255))
     print("seconds: ", time.time() - start)
 
-# FIXME: why can't set device 'cuda'?
+# TODO: add early termination based on metrics
+
+# OLD MODEL #
+# model = MultiOutputRegressor(xgb.XGBRegressor(**P, verbosity=2, seed=0))
+# model_R = xgb.XGBRegressor(**P, verbosity=2, seed=0)
+# model_R.fit(xtrain, ytrain_R, eval_set=[(xtrain, ytrain_R)], verbose=False, callbacks=[metrics_R_callback(), early_stop_execution])
+# ypred_R = model_R.predict(xtrain)

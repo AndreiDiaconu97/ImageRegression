@@ -1,0 +1,25 @@
+project: image_regression_final
+WANDB_DIR: "../out"
+program: reg_xgboost.py
+
+name: model_xgboost
+method: random
+metric:
+  goal: maximize
+  name: psnr
+parameters:
+  max_depth:
+    distribution: int_uniform
+    min: 5
+    max: 20
+  num_boost_round:
+    distribution: int_uniform
+    min: 1000
+    max: 10000
+  input_layer_size:
+    values: [ 4, 16, 32, 64, 128, 256 ]
+
+
+#early_terminate:
+#  type: hyperband
+#  min_iter: 3

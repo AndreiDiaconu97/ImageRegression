@@ -157,7 +157,7 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
 
 def train(net_ensemble, P, image, batches, criterion):
     h, w, channels = P["image_shape"]
-    wandb_run = wandb.init(project="image_regression_final", entity=WANDB_USER, dir="../out", config=P, tags=[], mode=WANDB_MODE)  # mode="disabled", id="2"
+    wandb_run = wandb.init(project="image_regression_final", entity=WANDB_USER, dir="../out", config=P, tags=["grownet"], mode=WANDB_MODE)  # mode="disabled", id="2"
     print(wandb_run.config)
     # wandb.watch(net_ensemble, criterion, log="all")  # log="all", log_freq=10, log_graph=True
 
@@ -227,3 +227,5 @@ if __name__ == '__main__':
 # save final results and models of best runs
 # add more metrics and organize them
 # log network memory size
+
+# TODO: 1 project per model, sweep in each one, finally move in a final project the best results

@@ -74,10 +74,10 @@ def batch_generator_in_memory(P, device, shuffle=False):
             positions.append((y, x))
     positions = torch.Tensor(positions).to(device)
 
-    if P["batch_sampling_mode"] == BatchSamplingMode.nth_element.name:
-        batches = [positions[i:: P["n_batches"]] for i in range(P["n_batches"])]
-    elif P["batch_sampling_mode"] == BatchSamplingMode.whole.name:
+    if not "batch_sampling_mode" in P or P["batch_sampling_mode"] == BatchSamplingMode.whole.name:
         batches = [positions]
+    elif P["batch_sampling_mode"] == BatchSamplingMode.nth_element.name:
+        batches = [positions[i:: P["n_batches"]] for i in range(P["n_batches"])]
     elif P["batch_sampling_mode"] == BatchSamplingMode.sequence.name:
         batches = list(torch.split(positions, P["batch_size"]))
     else:

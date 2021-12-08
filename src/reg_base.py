@@ -69,7 +69,7 @@ class MetricsManager:
 
 def train(model, P, image, optimizer, criterion, batches, schedulers):
     h, w, channels = P["image_shape"]
-    wandb_run = wandb.init(project="image_regression_final", entity=WANDB_USER, dir="../out", config=P, tags=[], mode=WANDB_MODE)  # id="2"
+    wandb_run = wandb.init(project="image_regression_final", entity=WANDB_USER, dir="../out", config=P, tags=["base_nn"], mode=WANDB_MODE)  # id="2"
     print(wandb.config)
     wandb.watch(model, criterion, log="all")  # log="all", log_freq=10, log_graph=True
     metrics_manager = MetricsManager(wandb_run)
