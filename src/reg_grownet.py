@@ -2,9 +2,8 @@ from config.default import OUT_ROOT, device, hparams_grownet, init_P, INPUT_PATH
 from torch import nn
 from torchmetrics.functional import ssim
 from tqdm import tqdm
-from utils import input_mapping, BatchSamplingMode, get_optimizer, batch_generator_in_memory, get_psnr, image_preprocess
+from utils import input_mapping, get_optimizer, batch_generator_in_memory, get_psnr, image_preprocess, get_model
 from utils.grownet import DynamicNet
-from utils.models import GON, NN
 import cv2
 import numpy as np
 import time
@@ -55,11 +54,11 @@ class MetricsManager:
         }, commit=True)
 
     def log_ensemble_summary(self, stage, P, loss_stage, optimizer, image, pred_image, net_ensemble):
-        h, w, channels = P["input_shape"]
-
+        h, w, channels = P["image_shape"]
         ensemble_mse = loss_stage  # np.sqrt(loss_stage / (P["n_batches"] * P["epochs_per_correction"]))
         ensemble_psnr = get_psnr(pred_image, image)
         ensemble_ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w))  # WARNING: takes a lot of memory
+
         self.wandb.log({
             "Summary/Ensemble_lr": optimizer.param_groups[0]['lr'],
             "Summary/Ensemble_psnr": ensemble_psnr,
@@ -71,13 +70,10 @@ class MetricsManager:
         print(f'Ensemble_MSE: {ensemble_mse: .5f}, Ensemble_PSNR: {ensemble_psnr: .5f}, Ensemble_SSIM: {ensemble_ssim: .5f}, Boost rate: {net_ensemble.boost_rate:.4f}\n')
 
 
-def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, metrics_manager):
-    model = GON.get_model(stage, P["hidden_size"] * 2, P["hidden_size"]).to(device) if P["model"] == 'gon' \
-        else NN.get_model(stage, P["hidden_size"] * 2, P["hidden_size"]).to(device)
-
+def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, criterion, metrics_manager):
+    model = get_model(P, stage).to(device)
     optimizer = get_optimizer(model.parameters(), P["lr_model"], P["optimizer"])
     # scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
-    criterion = nn.MSELoss()
 
     loss_epoch_cum = 0
     pbar = tqdm(range(P["epochs_per_stage"]), desc=f"Stage {stage + 1}/{P['num_nets']}: weak model training\t", unit=" epoch")
@@ -116,12 +112,10 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, metrics
     return model
 
 
-def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, lr_ensemble, metrics_manager):
-    h, w, channels = P["input_shape"]
+def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, lr_ensemble, metrics_manager):
     lr_scaler = 1
     optimizer = get_optimizer(net_ensemble.parameters(), lr_ensemble / lr_scaler, P["optimizer"])
     # scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
-    criterion = nn.MSELoss()
 
     # if stage % 15 == 0:
     #     # lr_scaler *= 2
@@ -161,11 +155,9 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
     return lr_ensemble
 
 
-def train(net_ensemble, P, image):
-    h, w, channels = P["input_shape"]
-    batches = batch_generator_in_memory(P, device, shuffle=False)
-
-    wandb_run = wandb.init(project="image_regression_final", entity="a-di", dir="../out", config=P, tags=[], mode=WANDB_MODE)  # mode="disabled", id="2"
+def train(net_ensemble, P, image, batches, criterion):
+    h, w, channels = P["image_shape"]
+    wandb_run = wandb.init(project="image_regression_final", entity=WANDB_USER, dir="../out", config=P, tags=[], mode=WANDB_MODE)  # mode="disabled", id="2"
     print(wandb_run.config)
     # wandb.watch(net_ensemble, criterion, log="all")  # log="all", log_freq=10, log_graph=True
 
@@ -174,18 +166,17 @@ def train(net_ensemble, P, image):
     pred_img_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
     pred_img_ensemble = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
 
-    criterion = nn.MSELoss()
     B = P["B_scale"] * torch.randn((P["hidden_size"], 2)).to(device)
     lr_ensemble = P["lr_ensemble"]
 
     # train new model and append to ensemble
     for stage in range(P["num_nets"]):
         net_ensemble.to_train()
-        weak_model = train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, metrics_manager)
+        weak_model = train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, criterion, metrics_manager)
         net_ensemble.add(weak_model)
 
         if stage > 0 and P["epochs_per_correction"] != 0:
-            lr_ensemble = fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, lr_ensemble, metrics_manager)
+            lr_ensemble = fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, lr_ensemble, metrics_manager)
 
         max_w = torch.max(pred_img_weak).cpu().numpy()
         min_w = torch.min(pred_img_weak).cpu().numpy()
@@ -206,13 +197,16 @@ def main():
 
     c0 = torch.Tensor([0.0, 0.0, 0.0]).to(device)  # torch.mean(image, dim=[0, 1])
     net_ensemble = DynamicNet(c0, P["boost_rate"])
+    criterion = nn.MSELoss()
 
-    train(net_ensemble, P, image)
+    batches = batch_generator_in_memory(P, device, shuffle=P["shuffle_batches"])
+    train(net_ensemble, P, image, batches, criterion)
 
 
 if __name__ == '__main__':
     start = time.time()
     # os.environ["WANDB_DIR"] = "../runs"
+    WANDB_USER = "a-di"
     WANDB_MODE = "online"  # ["online", "offline", "disabled"]
     main()
     print("seconds: ", time.time() - start)
@@ -222,13 +216,14 @@ if __name__ == '__main__':
 # move scale into P - OK
 # implement acc_gradients - OK
 # implement an universal object to wrap wandb logging and metrics - OK
-# check support for gon model
+# add tunable n_layers - OK
+# check support for gon model - OK
 # recycle optimizer?
-# add tunable n_layers
 # try without input mapping
 # compare grownet vs DNN vs my imageRegression without GrowNet
 # compare imageRegression with fourier-feature-networks repo
 # Finally make W&B report
 # implement checkpoints saving and loading
 # save final results and models of best runs
-# add more metrics and organize them better
+# add more metrics and organize them
+# log network memory size

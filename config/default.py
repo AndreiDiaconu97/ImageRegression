@@ -16,49 +16,58 @@ INPUT_PATH = "../data/IMG_0201_DxO.jpg"
 
 
 def init_P(P, image):
-    P["input_shape"] = image.shape
+    P["image_shape"] = image.shape
+    P["input_layer_size"] = P["hidden_size"] * 2
+
     if P["batch_sampling_mode"] == BatchSamplingMode.whole.name:
-        P["batch_size"] = np.prod(P["input_shape"][:2])
+        P["batch_size"] = np.prod(P["image_shape"][:2])
         P["n_batches"] = 1
     else:
-        P["n_batches"] = np.prod(P["input_shape"][:2]) // (P["batch_size"])
+        P["n_batches"] = np.prod(P["image_shape"][:2]) // (P["batch_size"])
 
     if P["batch_sampling_mode"] == BatchSamplingMode.sequence.name:
         P["n_batches"] += 1
 
 
 hparams_grownet = {
+    "type": "grownet",
     "B_scale": 0.03,
     "acc_gradients": False,
     "batch_sampling_mode": BatchSamplingMode.whole.name,
+    "shuffle_batches": True,
     "batch_size": 20000,
     "boost_rate": 1.0,
     "epochs_per_correction": 1,
     "epochs_per_stage": 100,
     "hidden_size": 32,
-    "input_shape": None,
+    "hidden_layers": 1,
+    "image_shape": None,
     "lr_ensemble": 0.001,
     "lr_model": 0.001,
-    "model": 'gon',
+    "model": 'siren',
     "num_nets": 50,
     "optimizer": 'adamW',
     "scale": 0.1
 }
 
 hparams_base = {
+    "type": "base",
     "B_scale": 0.0676,
     "acc_gradients": False,
-    "batch_sampling_mode": BatchSamplingMode.sequence.name,
+    "batch_sampling_mode": BatchSamplingMode.nth_element.name,
+    "shuffle_batches": True,
     "batch_size": 2272,
     "epochs": 5000,
-    "hidden_size": 256,
+    "hidden_size": 128,
+    "hidden_layers": 3,
     "lr": 0.000728,  # [0.01, 0.0001],
-    "model": 'nn',
+    "model": 'siren',
     "optimizer": 'adamW',
     "scale": 0.1
 }
 
 hparams_xgboost = {
+    "type": "xgboost",
     'eval_metric': ['mae', 'rmse'],
     'learning_rate': 0.6,
     'max_depth': 12,

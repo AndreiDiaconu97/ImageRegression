@@ -1,12 +1,9 @@
 import enum
 import random
-
 import cv2
 import torch
 import numpy as np
-
-
-# get_model(P, is_root, device)
+from utils.models import SIREN_grownet, NN_grownet, NN, gon_model
 
 
 class BatchSamplingMode(enum.Enum):
@@ -37,6 +34,29 @@ def get_psnr(pred, target):
     return 10 * torch.log10((torch.max(pred) ** 2) / torch.mean((pred - target) ** 2))
 
 
+def get_model(P, stage=0):
+    if P["type"] == "base":
+        if P["model"] == 'siren':
+            model = gon_model(P["input_layer_size"], P["hidden_size"], P["hidden_layers"])
+        elif P["model"] == 'nn':
+            model = NN(P["input_layer_size"], P["hidden_size"], P["hidden_layers"])
+        else:
+            raise ValueError(f'weak model type: unknown value {P["model"]}')
+        return model
+
+    elif P["type"] == "grownet":
+        if P["model"] == 'siren':
+            model = SIREN_grownet.get_model(stage, P["input_layer_size"], P["hidden_size"], P["hidden_layers"])
+        elif P["model"] == 'nn':
+            model = NN_grownet.get_model(stage, P["input_layer_size"], P["hidden_size"], P["hidden_layers"])
+        else:
+            raise ValueError(f'weak model type: unknown value {P["model"]}')
+        return model
+
+    else:
+        raise ValueError(f'unknown network type: {P["type"]}')
+
+
 def get_optimizer(model_params, lr, optim_name):
     return torch.optim.Adam(model_params, lr) if optim_name == 'adam' \
         else torch.optim.AdamW(model_params, lr) if optim_name == 'adamW' \
@@ -46,7 +66,7 @@ def get_optimizer(model_params, lr, optim_name):
 
 
 def batch_generator_in_memory(P, device, shuffle=False):
-    h, w, channels = P["input_shape"]
+    h, w, channels = P["image_shape"]
 
     positions = []
     for y in range(h):
@@ -61,7 +81,7 @@ def batch_generator_in_memory(P, device, shuffle=False):
     elif P["batch_sampling_mode"] == BatchSamplingMode.sequence.name:
         batches = list(torch.split(positions, P["batch_size"]))
     else:
-        raise ValueError('BatchSamplingMode: unknown value')
+        raise ValueError(f'BatchSamplingMode: unknown value {P["batch_sampling_mode"]}')
     if shuffle:
         random.shuffle(batches)
     return batches
