@@ -56,7 +56,8 @@ class NN_grownet(nn.Module):  # [x,y]->[RGB]
 
         layers = [nn.Linear(dim_in, hidden_size), nn.ReLU()]
         for i in range(1, num_layers - 1):
-            layers.append([nn.Linear(hidden_size, hidden_size), nn.ReLU()])
+            layers.append(nn.Linear(hidden_size, hidden_size))
+            layers.append(nn.ReLU())
 
         self.model_part1 = nn.Sequential(*layers)
         self.model_part2 = nn.Sequential(

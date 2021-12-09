@@ -30,21 +30,20 @@ def init_P(P, image):
 
 hparams_grownet = {
     'type': 'grownet',
-    'B_scale': 0.03,
+    'B_scale': 0.07,
     'acc_gradients': False,
-    'batch_sampling_mode': BatchSamplingMode.whole.name,
+    'batch_sampling_mode': BatchSamplingMode.nth_element.name,
     'shuffle_batches': True,
-    'batch_size': 20000,
+    'batch_size': 10000,
     'boost_rate': 1.0,
-    'epochs_per_correction': 1,
-    'epochs_per_stage': 100,
-    'hidden_size': 32,
+    'epochs_per_correction': 0,
+    'epochs_per_stage': 25,
+    'hidden_size': 128,
     'hidden_layers': 1,
-    'image_shape': None,
     'lr_ensemble': 0.001,
     'lr_model': 0.001,
     'model': 'siren',
-    'num_nets': 50,
+    'num_nets': 30,
     'optimizer': 'adamW',
     'scale': 0.1,
 }
@@ -91,9 +90,9 @@ hparams_xgboost = {
 # check support for gon model - OK
 # add more metrics and organize them - OK
 # try without input mapping
-# compare grownet vs DNN vs my imageRegression without GrowNet
 # compare imageRegression with fourier-feature-networks repo
-# Finally make W&B report
 # implement checkpoints saving and loading
 # save final results and models of best runs
-# log network memory size
+# log network model memory size
+# TODO: reorganize grownet output image saving
+# TODO: clean code to also work with zero correction epochs

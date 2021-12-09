@@ -49,6 +49,7 @@ class MetricsManager:
 
     def log_ensemble_epoch(self, P, epoch, stage, boost_rate, loss_epoch, optimizer, image, pred_image, pbar=None):
         h, w, channels = P["image_shape"]
+        self.ensemble_stage = stage
         self.ensemble_mse = loss_epoch  # np.sqrt(loss_stage / (P["n_batches"] * P["epochs_per_correction"]))
         self.ensemble_lr = optimizer.param_groups[0]["lr"]
         self.ensemble_psnr = get_psnr(pred_image, image).item()
@@ -87,13 +88,10 @@ class MetricsManager:
         print(f'\tEnsemble_MSE: {self.ensemble_mse: .5f}, Ensemble_PSNR: {self.ensemble_psnr: .5f}, Ensemble_SSIM: {self.ensemble_ssim: .5f}, Boost rate: {self.ensemble_boost_rate:.4f}\n')
 
 
-def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, criterion, metrics_manager):
+def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_grad_weak, criterion, metrics_manager):
     model = get_model(P, stage).to(device)
     optimizer = get_optimizer(model.parameters(), P["lr_model"], P["optimizer"])
-    # scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
-
-    h, w, channels = P["image_shape"]
-    img_grad_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
+    scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
 
     pbar = tqdm(range(P["epochs_per_stage"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: weak model training", unit=" epoch")
     for epoch in pbar:
@@ -122,7 +120,7 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, criteri
         if P["acc_gradients"]:
             optimizer.step()
             model.zero_grad()
-        # scheduler_plateau.step(loss)
+        scheduler_plateau.step(loss)
 
         loss_epoch = loss_batch_cum / len(batches)
         metrics_manager.log_weak_epoch(P, epoch + 1, stage + 1, loss_epoch, optimizer, img_grad_weak, pred_img_weak, pbar)
@@ -138,6 +136,25 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
     #     # lr_scaler *= 2
     #     lr_ensemble /= 2
     #     optimizer.param_groups[0]["lr"] = lr_ensemble
+
+    if P["epochs_per_correction"] == 0:  # just predict
+        loss_batch_cum = 0
+        for pos_batch in batches:
+            h_idx = pos_batch[:, 0].long()
+            w_idx = pos_batch[:, 1].long()
+            x = input_mapping(pos_batch.to(device), B)
+            y = image[h_idx, w_idx]
+
+            _, out = net_ensemble.forward(x)
+            pred_img_ensemble[h_idx, w_idx] = out.detach()
+
+            loss = criterion(out, y)
+            # loss.backward()
+            loss_batch_cum += loss.item()
+
+        loss_epoch = loss_batch_cum / len(batches)
+        metrics_manager.log_ensemble_epoch(P, 1, stage + 1, net_ensemble.boost_rate, loss_epoch, optimizer, image, pred_img_ensemble)
+        return lr_ensemble
 
     pbar = tqdm(range(P["epochs_per_correction"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: fully corrective step", unit=" epoch")
     for epoch in pbar:
@@ -176,6 +193,7 @@ def train(net_ensemble, P, image, batches, criterion):
 
     metrics_manager = MetricsManager(wandb_run)
 
+    img_grad_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
     pred_img_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
     pred_img_ensemble = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
 
@@ -185,18 +203,17 @@ def train(net_ensemble, P, image, batches, criterion):
     # train new model and append to ensemble
     for stage in range(P["num_nets"]):
         net_ensemble.to_train()
-        weak_model = train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, criterion, metrics_manager)
+        weak_model = train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_grad_weak, criterion, metrics_manager)
         net_ensemble.add(weak_model)
 
-        if stage > 0 and P["epochs_per_correction"] != 0:
+        if stage > 0:
             lr_ensemble = fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, lr_ensemble, metrics_manager)
 
-        max_w = torch.max(pred_img_weak).cpu().numpy()
-        min_w = torch.min(pred_img_weak).cpu().numpy()
-        # cv2.imwrite(ROOT + f'/grownet/_ensembleP1_stage{stage + 1}.png', (pred_img_ensemble.cpu().numpy() * 255))
-        cv2.imwrite(OUT_ROOT + f'/grownet/_ensembleP2_stage{stage + 1}.png', (pred_img_ensemble.cpu().numpy() * 255))
-        cv2.imwrite(OUT_ROOT + f'/grownet/_weak_stage{stage + 1}.png', pred_img_weak.cpu().numpy() * 255)
-        cv2.imwrite(OUT_ROOT + f'/grownet/_weakN_stage{stage + 1}.png', ((pred_img_weak.cpu().numpy() - min_w) / max_w * 255))
+        img_grad_weak = (img_grad_weak - img_grad_weak.min()) * 1 / (img_grad_weak.max() - img_grad_weak.min())
+        pred_img_weak = (pred_img_weak - pred_img_weak.min()) * 1 / (pred_img_weak.max() - pred_img_weak.min())
+        cv2.imwrite(OUT_ROOT + f'/grownet/_grad_{stage + 1}.png', (img_grad_weak.cpu().numpy() * 255))
+        cv2.imwrite(OUT_ROOT + f'/grownet/_weak_{stage + 1}.png', (pred_img_weak.cpu().numpy() * 255))
+        cv2.imwrite(OUT_ROOT + f'/grownet/_ensemble_{stage + 1}.png', (pred_img_ensemble.cpu().numpy() * 255))
     metrics_manager.log_ensemble_summary()
 
 

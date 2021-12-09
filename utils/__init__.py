@@ -23,7 +23,7 @@ def image_preprocess(image, P):
 
 
 def input_mapping(x, B):
-    if B is None:
+    if B is None or x is None:
         return x
     else:
         x_proj = (2. * np.pi * x) @ B.t()
