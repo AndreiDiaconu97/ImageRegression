@@ -29,41 +29,44 @@ def init_P(P, image):
 
 
 hparams_grownet = {
-    "B_scale": 0.03,
-    "acc_gradients": False,
-    "batch_sampling_mode": BatchSamplingMode.whole.name,
-    "shuffle_batches": True,
-    "batch_size": 20000,
-    "boost_rate": 1.0,
-    "epochs_per_correction": 1,
-    "epochs_per_stage": 100,
-    "hidden_size": 32,
-    "hidden_layers": 1,
-    "image_shape": None,
-    "lr_ensemble": 0.001,
-    "lr_model": 0.001,
-    "model": 'siren',
-    "num_nets": 50,
-    "optimizer": 'adamW',
-    "scale": 0.1,
+    'type': 'grownet',
+    'B_scale': 0.03,
+    'acc_gradients': False,
+    'batch_sampling_mode': BatchSamplingMode.whole.name,
+    'shuffle_batches': True,
+    'batch_size': 20000,
+    'boost_rate': 1.0,
+    'epochs_per_correction': 1,
+    'epochs_per_stage': 100,
+    'hidden_size': 32,
+    'hidden_layers': 1,
+    'image_shape': None,
+    'lr_ensemble': 0.001,
+    'lr_model': 0.001,
+    'model': 'siren',
+    'num_nets': 50,
+    'optimizer': 'adamW',
+    'scale': 0.1,
 }
 
 hparams_base = {
-    "B_scale": 0.0676,
-    "acc_gradients": False,
-    "batch_sampling_mode": BatchSamplingMode.nth_element.name,
-    "shuffle_batches": True,
-    "batch_size": 2272,
-    "epochs": 5000,
-    "hidden_size": 128,
-    "hidden_layers": 3,
-    "lr": 0.000728,  # [0.01, 0.0001],
-    "model": 'siren',
-    "optimizer": 'adamW',
-    "scale": 0.1,
+    'type': 'base',
+    'B_scale': 0.0676,
+    'acc_gradients': False,
+    'batch_sampling_mode': BatchSamplingMode.nth_element.name,
+    'shuffle_batches': True,
+    'batch_size': 2272,
+    'epochs': 2000,
+    'hidden_size': 128,
+    'hidden_layers': 3,
+    'lr': 0.000728,  # [0.01, 0.0001],
+    'model': 'siren',
+    'optimizer': 'adamW',
+    'scale': 0.1,
 }
 
 hparams_xgboost = {
+    'type': 'xgboost',
     'B_scale': 0.03,
     'eval_metric': ['rmse'],  # 'mae'
     'input_layer_size': 16 * 2,
@@ -79,3 +82,18 @@ hparams_xgboost = {
     'scale': 0.1,
     'subsample': 1,
 }
+# TODO:
+# check if loss is correct - OK
+# move scale into P - OK
+# implement acc_gradients - OK
+# implement an universal object to wrap wandb logging and metrics - OK
+# add tunable n_layers - OK
+# check support for gon model - OK
+# add more metrics and organize them - OK
+# try without input mapping
+# compare grownet vs DNN vs my imageRegression without GrowNet
+# compare imageRegression with fourier-feature-networks repo
+# Finally make W&B report
+# implement checkpoints saving and loading
+# save final results and models of best runs
+# log network memory size

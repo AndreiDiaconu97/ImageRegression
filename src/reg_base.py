@@ -41,30 +41,44 @@ import wandb
 class MetricsManager:
     def __init__(self, wandb_run):
         self.wandb = wandb_run
+        self.epoch = None
+        self.lr = None
+        self.loss = None
+        self.psnr = None
+        self.ssim = None
 
     def log_metrics(self, P, epoch, loss_epoch, optimizer, image, pred_image, pbar=None):
         h, w, channels = P["image_shape"]
-        model_psnr = get_psnr(pred_image, image)
-        model_ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w))
+        self.epoch = epoch
+        self.lr = optimizer.param_groups[0]['lr']
+        self.loss = loss_epoch
+        self.psnr = get_psnr(pred_image, image).item()
+        self.ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()
 
         if pbar:
             pbar.set_postfix({
                 "loss": loss_epoch,
                 "lr": optimizer.param_groups[0]['lr'],
-                "psnr": model_psnr.item(),
-                "ssim": model_ssim.item()
+                "psnr": self.psnr,
+                "ssim": self.ssim
             })
 
         self.wandb.log({
-            "loss": loss_epoch,
-            "Summary / Model_final_loss_epoch": loss_epoch,
-            "Summary/Ensemble_psnr": model_psnr,
-            "Summary/Ensemble_ssim": model_ssim,
-            "lr": optimizer.param_groups[0]['lr'],
-            "psnr": model_psnr,
-            "ssim": model_ssim,
-            "epoch": epoch + 1
+            "epoch": self.epoch,
+            "lr": self.lr,
+            "loss": self.loss,
+            "psnr": self.psnr,
+            "ssim": self.ssim
         }, commit=True)
+
+    def log_final_metrics(self):
+        self.wandb.log({
+            "Final/epoch": self.epoch,
+            "Final/lr": self.lr,
+            "Final/loss": self.loss,
+            "Final/psnr": self.psnr,
+            "Final/ssim": self.ssim,
+        })
 
 
 def train(model, P, image, optimizer, criterion, batches, schedulers):
@@ -77,8 +91,9 @@ def train(model, P, image, optimizer, criterion, batches, schedulers):
     loss = torch.tensor(0)
     pred_img = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
 
-    B = P["B_scale"] * torch.randn((P["hidden_size"], 2)).to(device)
+    B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
 
+    last_t = time.time()
     model.train()
     pbar = tqdm(range(P["epochs"]), unit=" epoch", desc=f"Training")
     for epoch in pbar:
@@ -105,19 +120,23 @@ def train(model, P, image, optimizer, criterion, batches, schedulers):
             schedulers["plateau"].step(loss)
         loss_epoch = loss_batch_cum / len(batches)
 
-        if (epoch + 1) % 1 == 0:
+        elapsed = time.time() - last_t
+        if (elapsed > 1) and (epoch + 1) % 1 == 0:
+            last_t = time.time()
             # print(f'epoch {epoch + 1}/{P["epochs"]}, loss={actual_loss:.8f}, psnr={model_psnr:.2f}, ssim={model_ssim:.2f} lr={optimizer.param_groups[0]["lr"]:.7f}')
-            metrics_manager.log_metrics(P, epoch, loss_epoch, optimizer, image, pred_img, pbar)
-            cv2.imwrite(OUT_ROOT + f'/sample_{epoch + 1}.png', (pred_img.cpu().numpy() * 255))  # .reshape((h, w, channels)))
+            metrics_manager.log_metrics(P, epoch + 1, loss_epoch, optimizer, image, pred_img, pbar)
+            cv2.imwrite(OUT_ROOT + f'/base/sample_{epoch + 1}.png', (pred_img.cpu().numpy() * 255))  # .reshape((h, w, channels)))
 
         if (epoch + 1) == P["epochs"]:
             cv2.imwrite(OUT_ROOT + f'/f_{epoch + 1}_' + "_".join([
+                "base",
                 "M", P["model"],
                 "lr", str(P["lr"]),
                 "Bsize", str(P["batch_size"]),
                 "Bscale", str(P["B_scale"]),
                 "OP", P["optimizer"]
             ]) + '.png', (pred_img.cpu().numpy() * 255))  # .reshape((h, w, channels)))
+    metrics_manager.log_final_metrics()
 
 
 def main():
@@ -125,7 +144,7 @@ def main():
 
     image = cv2.imread(INPUT_PATH)
     image = image_preprocess(image, P).to(device)
-    cv2.imwrite(OUT_ROOT + '/sample.png', image.cpu().numpy() * 255)
+    cv2.imwrite(OUT_ROOT + '/base/sample.png', image.cpu().numpy() * 255)
 
     init_P(P, image)
 
