@@ -39,8 +39,8 @@ import wandb
 #     return B, saved_epoch
 
 class MetricsManager:
-    def __init__(self, wandb_run):
-        self.wandb = wandb_run
+    def __init__(self):
+        self.n_params = None
         self.epoch = None
         self.lr = None
         self.loss = None
@@ -49,12 +49,12 @@ class MetricsManager:
 
     def log_metrics(self, P, epoch, model, loss_epoch, optimizer, image, pred_image, pbar=None):
         h, w, channels = P["image_shape"]
+        self.n_params = get_paramas_num(model)
         self.epoch = epoch
         self.lr = optimizer.param_groups[0]['lr']
         self.loss = loss_epoch
         self.psnr = get_psnr(pred_image, image).item()
         self.ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()
-        self.n_params = get_paramas_num(model)
 
         if pbar:
             pbar.set_postfix({
@@ -65,7 +65,7 @@ class MetricsManager:
                 "n_params": self.n_params
             })
 
-        self.wandb.log({
+        wandb.log({
             "epoch": self.epoch,
             "lr": self.lr,
             "loss": self.loss,
@@ -75,7 +75,7 @@ class MetricsManager:
         }, commit=True)
 
     def log_final_metrics(self):
-        self.wandb.log({
+        wandb.log({
             "Final/epoch": self.epoch,
             "Final/lr": self.lr,
             "Final/loss": self.loss,
@@ -86,19 +86,14 @@ class MetricsManager:
 
 
 def train(model, P, image, optimizer, criterion, batches, schedulers):
+    model.train()
     h, w, channels = P["image_shape"]
-    wandb_run = wandb.init(project="image_regression_final", entity=WANDB_USER, dir="../out", config=P, tags=["base_nn"], mode=WANDB_MODE)  # id="2"
-    print(wandb.config)
-    wandb.watch(model, criterion, log="all")  # log="all", log_freq=10, log_graph=True
-    metrics_manager = MetricsManager(wandb_run)
-
-    loss = torch.tensor(0)
-    pred_img = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
-
+    metrics_manager = MetricsManager()
     B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
 
+    pred_img = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
+
     last_t = time.time()
-    model.train()
     pbar = tqdm(range(P["epochs"]), unit=" epoch", desc=f"Training")
     for epoch in pbar:
         loss_batch_cum = 0
@@ -143,6 +138,10 @@ def train(model, P, image, optimizer, criterion, batches, schedulers):
                 "Bscale", str(P["B_scale"]),
                 "OP", P["optimizer"]
             ]) + '.png', (pred_img.cpu().numpy() * 255))  # .reshape((h, w, channels)))
+
+    # TODO: save onnx model + B to WANDB
+    # torch.onnx.export(model, input_mapping(pos_batch, B), OUT_ROOT + f'/base/model_base.onnx', input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
+    # np.save(OUT_ROOT + "/base/B", B.cpu().numpy())
     metrics_manager.log_final_metrics()
 
 
@@ -166,15 +165,25 @@ def main():
         "plateau": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
     }
 
-    # summary(model, input_size=(P["batch_size"], P["hidden_size"] * 2))
     batches = batch_generator_in_memory(P, device, shuffle=P["shuffle_batches"])
-    train(model, P, image, optimizer, criterion, batches, schedulers)
+    with wandb.init(project="image_regression_final", dir="../out", config=P, **WANDB_CFG):
+        print(wandb.config)
+        # summary(model, input_size=(P["batch_size"], P["hidden_size"] * 2))
+        wandb.watch(model, criterion, log="all")  # log="all", log_freq=10, log_graph=True
+        train(model, P, image, optimizer, criterion, batches, schedulers)
 
 
 if __name__ == '__main__':
     start = time.time()
-    WANDB_USER = "a-di"
-    WANDB_MODE = "online"  # ["online", "offline", "disabled"]
+    WANDB_CFG = {
+        "entity": "a-di",
+        "mode": "online",  # ["online", "offline", "disabled"]
+        "tags": ["base_nn"],
+        "group": None,  # "exp_1",
+        "job_type": None,
+        "id": None
+    }
+
     get_checkpoint = False
     save_checkpoints = False
     main()

@@ -14,8 +14,7 @@ import wandb
 
 
 class MetricsManager:
-    def __init__(self, wandb_run):
-        self.wandb = wandb_run
+    def __init__(self):
         self.ensemble_mse = None
         self.ensemble_ssim = None
         self.ensemble_psnr = None
@@ -24,7 +23,8 @@ class MetricsManager:
         self.ensemble_boost_rate = None
         self.n_params = None
 
-    def log_weak_epoch(self, P, epoch, stage, model, loss_epoch, optimizer, image, pred_image, pbar=None):
+    @staticmethod
+    def log_weak_epoch(P, epoch, stage, model, loss_epoch, optimizer, image, pred_image, pbar=None):
         h, w, channels = P["image_shape"]
         lr = optimizer.param_groups[0]['lr']
         _psnr = get_psnr(pred_image, image).item()
@@ -41,7 +41,7 @@ class MetricsManager:
                 # 'grad0': grad_direction[0].detach().cpu().numpy()
             })
 
-        self.wandb.log({
+        wandb.log({
             "epoch": epoch,
             "stage": stage,
             "Weak/lr": lr,
@@ -71,7 +71,7 @@ class MetricsManager:
                 'n:params': self.n_params
             })
 
-        self.wandb.log({
+        wandb.log({
             "epoch": epoch,
             "stage": self.ensemble_stage,
             "Ensemble/lr": self.ensemble_lr,
@@ -83,7 +83,7 @@ class MetricsManager:
         }, commit=True)
 
     def log_ensemble_summary(self):
-        self.wandb.log({
+        wandb.log({
             "Final/stage": self.ensemble_stage,
             "Final/lr": self.ensemble_lr,
             "Final/psnr": self.ensemble_psnr,
@@ -194,23 +194,18 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
 
 
 def train(net_ensemble, P, image, batches, criterion):
+    net_ensemble.to_train()
     h, w, channels = P["image_shape"]
-    wandb_run = wandb.init(project="image_regression_final", entity=WANDB_USER, dir="../out", config=P, tags=["grownet"], mode=WANDB_MODE)  # mode="disabled", id="2"
-    print(wandb_run.config)
-    # wandb.watch(net_ensemble, criterion, log="all")  # log="all", log_freq=10, log_graph=True
-
-    metrics_manager = MetricsManager(wandb_run)
+    metrics_manager = MetricsManager()
+    B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
 
     img_grad_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
     pred_img_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
     pred_img_ensemble = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
 
-    B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
-    lr_ensemble = P["lr_ensemble"]
-
     # train new model and append to ensemble
+    lr_ensemble = P["lr_ensemble"]
     for stage in range(P["num_nets"]):
-        net_ensemble.to_train()
         weak_model = train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_grad_weak, criterion, metrics_manager)
         net_ensemble.add(weak_model)
 
@@ -239,13 +234,23 @@ def main():
     criterion = nn.MSELoss()
 
     batches = batch_generator_in_memory(P, device, shuffle=P["shuffle_batches"])
-    train(net_ensemble, P, image, batches, criterion)
+    with wandb.init(project="image_regression_final", **WANDB_CFG, dir="../out", config=P):
+        print(wandb.config)
+        # wandb.watch(net_ensemble, criterion, log="all")  # log="all", log_freq=10, log_graph=True
+        train(net_ensemble, P, image, batches, criterion)
 
 
 if __name__ == '__main__':
     start = time.time()
     # os.environ["WANDB_DIR"] = "../runs"
-    WANDB_USER = "a-di"
-    WANDB_MODE = "online"  # ["online", "offline", "disabled"]
+    WANDB_CFG = {
+        "entity": "a-di",
+        "mode": "online",  # ["online", "offline", "disabled"]
+        "tags": ["grownet"],
+        "group": None,  # "exp_1",
+        "job_type": None,
+        "id": None
+    }
+
     main()
     print("seconds: ", time.time() - start)
