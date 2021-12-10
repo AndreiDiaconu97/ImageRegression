@@ -4,7 +4,7 @@ from config.default import OUT_ROOT, device, hparams_grownet, init_P, INPUT_PATH
 from torch import nn
 from torchmetrics.functional import ssim
 from tqdm import tqdm
-from utils import input_mapping, get_optimizer, batch_generator_in_memory, get_psnr, image_preprocess, get_model
+from utils import input_mapping, get_optimizer, batch_generator_in_memory, get_psnr, image_preprocess, get_model, get_paramas_num
 from utils.grownet import DynamicNet
 import cv2
 import numpy as np
@@ -16,25 +16,28 @@ import wandb
 class MetricsManager:
     def __init__(self, wandb_run):
         self.wandb = wandb_run
-        self.ensemble_boost_rate = None
         self.ensemble_mse = None
         self.ensemble_ssim = None
         self.ensemble_psnr = None
         self.ensemble_lr = None
         self.ensemble_stage = None
+        self.ensemble_boost_rate = None
+        self.n_params = None
 
-    def log_weak_epoch(self, P, epoch, stage, loss_epoch, optimizer, image, pred_image, pbar=None):
+    def log_weak_epoch(self, P, epoch, stage, model, loss_epoch, optimizer, image, pred_image, pbar=None):
         h, w, channels = P["image_shape"]
         lr = optimizer.param_groups[0]['lr']
         _psnr = get_psnr(pred_image, image).item()
         _ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()
+        _n_params = get_paramas_num(model)
 
         if pbar:
             pbar.set_postfix({
                 'lr': lr,
                 'loss': loss_epoch,
                 'psnr': _psnr,
-                'ssim': _ssim
+                'ssim': _ssim,
+                'n_params': _n_params
                 # 'grad0': grad_direction[0].detach().cpu().numpy()
             })
 
@@ -44,17 +47,19 @@ class MetricsManager:
             "Weak/lr": lr,
             "Weak/loss": loss_epoch,
             "Weak/psnr": _psnr,
-            "Weak/ssim": _ssim
+            "Weak/ssim": _ssim,
+            "Weak/n_params": _n_params
         }, commit=True)
 
-    def log_ensemble_epoch(self, P, epoch, stage, boost_rate, loss_epoch, optimizer, image, pred_image, pbar=None):
+    def log_ensemble_epoch(self, P, epoch, stage, net_ensemble, loss_epoch, optimizer, image, pred_image, pbar=None):
         h, w, channels = P["image_shape"]
         self.ensemble_stage = stage
         self.ensemble_mse = loss_epoch  # np.sqrt(loss_stage / (P["n_batches"] * P["epochs_per_correction"]))
         self.ensemble_lr = optimizer.param_groups[0]["lr"]
         self.ensemble_psnr = get_psnr(pred_image, image).item()
         self.ensemble_ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()  # WARNING: takes a lot of memory
-        self.ensemble_boost_rate = boost_rate.item()
+        self.ensemble_boost_rate = net_ensemble.boost_rate.item()
+        self.n_params = get_paramas_num(net_ensemble)
 
         if pbar:
             pbar.set_postfix({
@@ -62,7 +67,8 @@ class MetricsManager:
                 'loss': self.ensemble_mse,
                 'psnr': self.ensemble_psnr,
                 'ssim': self.ensemble_ssim,
-                'boost_rate': self.ensemble_boost_rate
+                'boost_rate': self.ensemble_boost_rate,
+                'n:params': self.n_params
             })
 
         self.wandb.log({
@@ -72,7 +78,8 @@ class MetricsManager:
             "Ensemble/psnr": self.ensemble_psnr,
             "Ensemble/ssim": self.ensemble_ssim,
             "Ensemble/loss": self.ensemble_mse,
-            "Ensemble/boost_rate": self.ensemble_boost_rate
+            "Ensemble/boost_rate": self.ensemble_boost_rate,
+            "Ensemble/n_params": self.n_params
         }, commit=True)
 
     def log_ensemble_summary(self):
@@ -83,6 +90,7 @@ class MetricsManager:
             "Final/ssim": self.ensemble_ssim,
             "Final/loss": self.ensemble_mse,
             "Final/boost_rate": self.ensemble_boost_rate,
+            "Final/n_params": self.n_params
         }, commit=True)
         print("FINISH:")
         print(f'\tEnsemble_MSE: {self.ensemble_mse: .5f}, Ensemble_PSNR: {self.ensemble_psnr: .5f}, Ensemble_SSIM: {self.ensemble_ssim: .5f}, Boost rate: {self.ensemble_boost_rate:.4f}\n')
@@ -123,7 +131,7 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
         scheduler_plateau.step(loss)
 
         loss_epoch = loss_batch_cum / len(batches)
-        metrics_manager.log_weak_epoch(P, epoch + 1, stage + 1, loss_epoch, optimizer, img_grad_weak, pred_img_weak, pbar)
+        metrics_manager.log_weak_epoch(P, epoch + 1, stage + 1, model, loss_epoch, optimizer, img_grad_weak, pred_img_weak, pbar)
     return model
 
 
@@ -153,7 +161,7 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
             loss_batch_cum += loss.item()
 
         loss_epoch = loss_batch_cum / len(batches)
-        metrics_manager.log_ensemble_epoch(P, 1, stage + 1, net_ensemble.boost_rate, loss_epoch, optimizer, image, pred_img_ensemble)
+        metrics_manager.log_ensemble_epoch(P, 1, stage + 1, net_ensemble, loss_epoch, optimizer, image, pred_img_ensemble)
         return lr_ensemble
 
     pbar = tqdm(range(P["epochs_per_correction"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: fully corrective step", unit=" epoch")
@@ -181,7 +189,7 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
         # scheduler_plateau.step(loss)
 
         loss_epoch = loss_batch_cum / len(batches)
-        metrics_manager.log_ensemble_epoch(P, epoch + 1, stage + 1, net_ensemble.boost_rate, loss_epoch, optimizer, image, pred_img_ensemble, pbar)
+        metrics_manager.log_ensemble_epoch(P, epoch + 1, stage + 1, net_ensemble, loss_epoch, optimizer, image, pred_img_ensemble, pbar)
     return lr_ensemble
 
 
@@ -226,7 +234,7 @@ def main():
 
     init_P(P, image)
 
-    c0 = torch.Tensor([0.0, 0.0, 0.0]).to(device)  # torch.mean(image, dim=[0, 1])
+    c0 = torch.mean(image, dim=[0, 1])  # torch.Tensor([0.0, 0.0, 0.0]).to(device)
     net_ensemble = DynamicNet(c0, P["boost_rate"])
     criterion = nn.MSELoss()
 

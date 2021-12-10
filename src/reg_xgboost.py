@@ -1,3 +1,5 @@
+import pickle
+from xgboost.core import EarlyStopException
 from config.default import OUT_ROOT, init_P, INPUT_PATH, hparams_xgboost
 from torchmetrics.functional import ssim
 from utils import batch_generator_in_memory, input_mapping, image_preprocess, get_psnr
@@ -31,6 +33,9 @@ def metrics_R_callback(channel):
                 "ssim": _ssim,
             })
 
+            if psnr >= P["desired_psnr"]:
+                raise EarlyStopException(env.iteration)
+
     return callback
 
 
@@ -60,10 +65,12 @@ if __name__ == '__main__':
     # TRAIN #
     wandb_run = wandb.init(project="image_regression_final", entity=WANDB_USER, dir="../out", config=P, tags=["xgboost"], mode=WANDB_MODE)  # id="2"
     channels_pred = {"R": None, "G": None, "B": None}
+    models = {"R": None, "G": None, "B": None}
     for c in channels_pred:
         model = xgb.train(P, xgtrains[c], num_boost_round=P["num_boost_round"], evals=[(xgtrains[c], 'Train')], verbose_eval=False,
                           callbacks=[metrics_R_callback(c), early_stop_execution])
         channels_pred[c] = model.predict(xgtrains[c])
+        models[c] = model
         # pred_img = torch.Tensor(channels_pred[c]).view(h, w, 1).numpy()
         # cv2.imwrite(OUT_ROOT + f'/xgboost_{c}.png', (pred_img * 255))
 
@@ -83,6 +90,9 @@ if __name__ == '__main__':
     # save output #
     pred_img = ypred_RGB.view(h, w, channels).numpy()
     cv2.imwrite(OUT_ROOT + f'/xgboost_RGB.png', (pred_img * 255))
+
+    for c in models:
+        pickle.dump(models[c], open(OUT_ROOT + f"/xgboost_model_{c}.pkl", "wb"))  # saveopts model
     print("seconds: ", time.time() - start)
 
 # TODO: add early termination based on metrics

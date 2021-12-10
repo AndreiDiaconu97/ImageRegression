@@ -9,7 +9,7 @@ from torchinfo import summary
 from torchmetrics import SSIM
 from torchvision import transforms
 from tqdm import tqdm
-from utils import input_mapping, get_psnr, batch_generator_in_memory, image_preprocess, get_model, get_optimizer
+from utils import input_mapping, get_psnr, batch_generator_in_memory, image_preprocess, get_model, get_optimizer, get_paramas_num
 import cv2
 import enum
 import matplotlib.pyplot as plt
@@ -47,20 +47,22 @@ class MetricsManager:
         self.psnr = None
         self.ssim = None
 
-    def log_metrics(self, P, epoch, loss_epoch, optimizer, image, pred_image, pbar=None):
+    def log_metrics(self, P, epoch, model, loss_epoch, optimizer, image, pred_image, pbar=None):
         h, w, channels = P["image_shape"]
         self.epoch = epoch
         self.lr = optimizer.param_groups[0]['lr']
         self.loss = loss_epoch
         self.psnr = get_psnr(pred_image, image).item()
         self.ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()
+        self.n_params = get_paramas_num(model)
 
         if pbar:
             pbar.set_postfix({
                 "loss": loss_epoch,
                 "lr": optimizer.param_groups[0]['lr'],
                 "psnr": self.psnr,
-                "ssim": self.ssim
+                "ssim": self.ssim,
+                "n_params": self.n_params
             })
 
         self.wandb.log({
@@ -68,7 +70,8 @@ class MetricsManager:
             "lr": self.lr,
             "loss": self.loss,
             "psnr": self.psnr,
-            "ssim": self.ssim
+            "ssim": self.ssim,
+            "n_params": self.n_params
         }, commit=True)
 
     def log_final_metrics(self):
@@ -78,6 +81,7 @@ class MetricsManager:
             "Final/loss": self.loss,
             "Final/psnr": self.psnr,
             "Final/ssim": self.ssim,
+            "Final/n_params": self.n_params
         })
 
 
@@ -103,12 +107,9 @@ def train(model, P, image, optimizer, criterion, batches, schedulers):
             w_idx = pos_batch[:, 1].long()
 
             y_pred = model(input_mapping(pos_batch, B))
-            pred_img[h_idx, w_idx] = y_pred.detach()
             loss = criterion(image[h_idx, w_idx], y_pred)
             loss.backward()
             loss_batch_cum += loss.item()
-            # if P["acc_gradients"]:
-            #     loss /= len(batches)
 
             if not P["acc_gradients"]:
                 optimizer.step()
@@ -120,11 +121,17 @@ def train(model, P, image, optimizer, criterion, batches, schedulers):
             schedulers["plateau"].step(loss)
         loss_epoch = loss_batch_cum / len(batches)
 
+        for i, pos_batch in enumerate(batches):  # save prediction
+            h_idx = pos_batch[:, 0].long()
+            w_idx = pos_batch[:, 1].long()
+            y_pred = model(input_mapping(pos_batch, B))
+            pred_img[h_idx, w_idx] = y_pred.detach()
+
         elapsed = time.time() - last_t
         if (elapsed > 1) and (epoch + 1) % 1 == 0:
             last_t = time.time()
             # print(f'epoch {epoch + 1}/{P["epochs"]}, loss={actual_loss:.8f}, psnr={model_psnr:.2f}, ssim={model_ssim:.2f} lr={optimizer.param_groups[0]["lr"]:.7f}')
-            metrics_manager.log_metrics(P, epoch + 1, loss_epoch, optimizer, image, pred_img, pbar)
+            metrics_manager.log_metrics(P, epoch + 1, model, loss_epoch, optimizer, image, pred_img, pbar)
             cv2.imwrite(OUT_ROOT + f'/base/sample_{epoch + 1}.png', (pred_img.cpu().numpy() * 255))  # .reshape((h, w, channels)))
 
         if (epoch + 1) == P["epochs"]:

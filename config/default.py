@@ -50,13 +50,13 @@ hparams_grownet = {
 
 hparams_base = {
     'type': 'base',
-    'B_scale': 0.0676,
+    'B_scale': 0.07,
     'acc_gradients': False,
     'batch_sampling_mode': BatchSamplingMode.nth_element.name,
     'shuffle_batches': True,
-    'batch_size': 2272,
+    'batch_size': 5000,
     'epochs': 2000,
-    'hidden_size': 128,
+    'hidden_size': 256,
     'hidden_layers': 3,
     'lr': 0.000728,  # [0.01, 0.0001],
     'model': 'siren',
@@ -80,6 +80,7 @@ hparams_xgboost = {
     'reg_lambda': 0.01,
     'scale': 0.1,
     'subsample': 1,
+    'desired_psnr': 35
 }
 # TODO:
 # check if loss is correct - OK
@@ -89,10 +90,10 @@ hparams_xgboost = {
 # add tunable n_layers - OK
 # check support for gon model - OK
 # add more metrics and organize them - OK
+# log network model memory size - OK?
 # try without input mapping
 # compare imageRegression with fourier-feature-networks repo
 # implement checkpoints saving and loading
 # save final results and models of best runs
-# log network model memory size
-# TODO: reorganize grownet output image saving
 # TODO: clean code to also work with zero correction epochs
+# log n_parameters in xgboost

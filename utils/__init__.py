@@ -30,6 +30,10 @@ def input_mapping(x, B):
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
 
+def get_paramas_num(model):
+    return sum(p.numel() for p in model.parameters())
+
+
 def get_psnr(pred, target):
     return 10 * torch.log10((torch.max(pred) ** 2) / torch.mean((pred - target) ** 2))
 
