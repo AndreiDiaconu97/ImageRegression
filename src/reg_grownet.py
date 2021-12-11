@@ -1,12 +1,11 @@
 import glob
 import os
 from datetime import timedelta
-
 from config.default import OUT_ROOT, device, hparams_grownet, init_P, INPUT_PATH
 from torch import nn
 from torchmetrics.functional import ssim
 from tqdm import tqdm
-from utils import input_mapping, get_optimizer, batch_generator_in_memory, get_psnr, image_preprocess, get_model, get_paramas_num, save_checkpoint, load_checkpoint
+from utils import input_mapping, get_optimizer, batch_generator_in_memory, get_psnr, image_preprocess, get_model, get_params_num, save_checkpoint, load_checkpoint
 from utils.grownet import DynamicNet
 import cv2
 import numpy as np
@@ -36,19 +35,14 @@ class MetricsManager:
         self.n_params = None
 
     @staticmethod
-    def log_weak_epoch(P, epoch, stage, model, loss_epoch, optimizer, image, pred_image, pbar=None):
-        h, w, channels = P["image_shape"]
+    def log_weak_epoch(P, epoch, stage, model, loss_epoch, optimizer, pbar=None):
         lr = optimizer.param_groups[0]['lr']
-        _psnr = get_psnr(pred_image, image).item()
-        _ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()
-        _n_params = get_paramas_num(model)
+        _n_params = get_params_num(model)
 
         if pbar:
             pbar.set_postfix({
                 'lr': lr,
                 'loss': loss_epoch,
-                'psnr': _psnr,
-                'ssim': _ssim,
                 'n_params': _n_params
                 # 'grad0': grad_direction[0].detach().cpu().numpy()
             })
@@ -58,44 +52,68 @@ class MetricsManager:
             "stage": stage,
             "Weak/lr": lr,
             "Weak/loss": loss_epoch,
-            "Weak/psnr": _psnr,
-            "Weak/ssim": _ssim,
             "Weak/n_params": _n_params
         }, commit=True)
 
-    def print_ensemble_stage(self):
-        print(f'Ensemble_MSE: {self.ensemble_mse: .5f}, Ensemble_PSNR: {self.ensemble_psnr: .5f}, Ensemble_SSIM: {self.ensemble_ssim: .5f}, Boost rate: {self.ensemble_boost_rate:.4f}\n')
-
-    def log_ensemble_epoch(self, P, epoch, stage, net_ensemble, loss_epoch, optimizer, image, pred_image, pbar=None):
+    @staticmethod
+    def log_weak_stage(P, stage, image, pred_image):
         h, w, channels = P["image_shape"]
+        _psnr = get_psnr(pred_image, image).item()
+        _ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()
+
+        wandb.log({
+            "stage": stage,
+            "Weak/psnr": _psnr,
+            "Weak/ssim": _ssim,
+        }, commit=True)
+
+        print(f'Weak_PSNR: {_psnr: .5f}, Weak_SSIM: {_ssim: .5f}')
+
+    def log_ensemble_epoch(self, epoch, stage, net_ensemble, loss_epoch, optimizer, pbar=None):
         self.ensemble_stage = stage
-        self.ensemble_mse = loss_epoch  # np.sqrt(loss_stage / (P["n_batches"] * P["epochs_per_correction"]))
-        self.ensemble_lr = optimizer.param_groups[0]["lr"]
-        self.ensemble_psnr = get_psnr(pred_image, image).item()
-        self.ensemble_ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()  # WARNING: takes a lot of memory
+        self.n_params = get_params_num(net_ensemble)
         self.ensemble_boost_rate = net_ensemble.boost_rate.item()
-        self.n_params = get_paramas_num(net_ensemble)
+        self.ensemble_lr = optimizer.param_groups[0]["lr"]
+        self.ensemble_mse = loss_epoch  # np.sqrt(loss_stage / (P["n_batches"] * P["epochs_per_correction"]))
 
         if pbar:
             pbar.set_postfix({
+                'n_params': self.n_params,
+                'boost_rate': self.ensemble_boost_rate,
                 'lr': self.ensemble_lr,
                 'loss': self.ensemble_mse,
-                'psnr': self.ensemble_psnr,
-                'ssim': self.ensemble_ssim,
-                'boost_rate': self.ensemble_boost_rate,
-                'n:params': self.n_params
             })
 
         wandb.log({
             "epoch": epoch,
             "stage": self.ensemble_stage,
+            "Ensemble/n_params": self.n_params,
+            "Ensemble/boost_rate": self.ensemble_boost_rate,
             "Ensemble/lr": self.ensemble_lr,
+            "Ensemble/loss": self.ensemble_mse,
+        }, commit=True)
+
+    def log_ensemble_stage(self, P, stage, net_ensemble, loss_epoch, optimizer, image, pred_image):
+        h, w, channels = P["image_shape"]
+        self.ensemble_stage = stage
+        self.n_params = get_params_num(net_ensemble)
+        self.ensemble_boost_rate = net_ensemble.boost_rate.item()
+        self.ensemble_lr = optimizer.param_groups[0]["lr"]
+        self.ensemble_mse = loss_epoch  # np.sqrt(loss_stage / (P["n_batches"] * P["epochs_per_correction"]))
+        self.ensemble_psnr = get_psnr(pred_image, image).item()
+        self.ensemble_ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()  # WARNING: takes a lot of memory
+
+        wandb.log({
+            "stage": self.ensemble_stage,
+            "Ensemble/n_params": self.n_params,
+            "Ensemble/boost_rate": self.ensemble_boost_rate,
+            "Ensemble/lr": self.ensemble_lr,
+            "Ensemble/loss": self.ensemble_mse,
             "Ensemble/psnr": self.ensemble_psnr,
             "Ensemble/ssim": self.ensemble_ssim,
-            "Ensemble/loss": self.ensemble_mse,
-            "Ensemble/boost_rate": self.ensemble_boost_rate,
-            "Ensemble/n_params": self.n_params
         }, commit=True)
+
+        print(f'Ensemble_MSE: {self.ensemble_mse: .5f}, Ensemble_PSNR: {self.ensemble_psnr: .5f}, Ensemble_SSIM: {self.ensemble_ssim: .5f}, Boost rate: {self.ensemble_boost_rate:.4f}\n')
 
     def log_ensemble_summary(self):
         onnx_weak_s = 0
@@ -113,8 +131,9 @@ class MetricsManager:
             "Final/n_params": self.n_params,
             "Final/model(KB)": os.path.getsize(PATH_CHECKPOINT) / 1000,
             "Final/onnx(KB)": onnx_weak_s / 1000,
-            "image": wandb.Image(f'{OUT_ROOT}/{FOLDER}/_ensemble_{self.ensemble_stage}.png'),
-            "image_error": wandb.Image(f'{OUT_ROOT}/{FOLDER}/_grad_{self.ensemble_stage}.png')
+            "image": wandb.Image(f'{OUT_ROOT}/{FOLDER}/pred/_ensemble_{self.ensemble_stage}.png'),
+            "image_weak": wandb.Image(f'{OUT_ROOT}/{FOLDER}/pred_weak/_weak_{self.ensemble_stage}.png'),
+            "image_error": wandb.Image(f'{OUT_ROOT}/{FOLDER}/error/_grad_{self.ensemble_stage}.png')
         }, commit=True)
 
 
@@ -124,9 +143,10 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
     scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
 
     pbar = tqdm(range(P["epochs_per_stage"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: weak model training", unit=" epoch")
+    middle_features = []
     for epoch in pbar:
         loss_batch_cum = 0
-        middle_features = []
+        middle_features.clear()
         for pos_batch in batches:
             h_idx = pos_batch[:, 0].long()
             w_idx = pos_batch[:, 1].long()
@@ -152,16 +172,19 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
             model.zero_grad()
         scheduler_plateau.step(loss)
 
-        for i, pos_batch in enumerate(batches):
-            h_idx = pos_batch[:, 0].long()
-            w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch, B)
-            _, out = model(x, middle_features[i])
-            pred_img_weak[h_idx, w_idx] = out.detach()
-            # make_dot(loss, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(f"_model_{stage + 1}", format="svg")
-
         loss_epoch = loss_batch_cum / len(batches)
-        metrics_manager.log_weak_epoch(P, epoch + 1, stage + 1, model, loss_epoch, optimizer, img_grad_weak, pred_img_weak, pbar)
+        metrics_manager.log_weak_epoch(P, epoch + 1, stage + 1, model, loss_epoch, optimizer, pbar)
+
+    # DEBUG + PSNR + SSIM #
+    for i, pos_batch in enumerate(batches):
+        h_idx = pos_batch[:, 0].long()
+        w_idx = pos_batch[:, 1].long()
+        x = input_mapping(pos_batch, B)
+        _, out = model(x, middle_features[i])
+        pred_img_weak[h_idx, w_idx] = out.detach()
+        # make_dot(loss, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(f"_model_{stage + 1}", format="svg")
+    metrics_manager.log_weak_stage(P, stage + 1, img_grad_weak, pred_img_weak)
+
     return model
 
 
@@ -175,25 +198,6 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
     #     lr_ensemble /= 2
     #     optimizer.param_groups[0]["lr"] = lr_ensemble
 
-    if P["epochs_per_correction"] == 0:  # FIXME: refactor this s**t
-        loss_batch_cum = 0
-        for pos_batch in batches:
-            h_idx = pos_batch[:, 0].long()
-            w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch, B)
-            y = image[h_idx, w_idx]
-
-            _, out = net_ensemble.forward(x)
-            pred_img_ensemble[h_idx, w_idx] = out.detach()  # FIXME: put in separate loop
-
-            loss = criterion(out, y)
-            # loss.backward()
-            loss_batch_cum += loss.item()
-
-        loss_epoch = loss_batch_cum / len(batches)
-        metrics_manager.log_ensemble_epoch(P, 1, stage + 1, net_ensemble, loss_epoch, optimizer, image, pred_img_ensemble)
-        return lr_ensemble
-
     pbar = tqdm(range(P["epochs_per_correction"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: fully corrective step", unit=" epoch")
     for epoch in pbar:
         loss_batch_cum = 0
@@ -204,8 +208,6 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
             y = image[h_idx, w_idx]
 
             _, out = net_ensemble.forward(x)  # TODO: check forward_grad()
-            pred_img_ensemble[h_idx, w_idx] = out.detach()  # FIXME: put in separate loop
-
             loss = criterion(out, y)
             loss.backward()
             loss_batch_cum += loss.item()
@@ -219,7 +221,25 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
         # scheduler_plateau.step(loss)
 
         loss_epoch = loss_batch_cum / len(batches)
-        metrics_manager.log_ensemble_epoch(P, epoch + 1, stage + 1, net_ensemble, loss_epoch, optimizer, image, pred_img_ensemble, pbar)
+        metrics_manager.log_ensemble_epoch(epoch + 1, stage + 1, net_ensemble, loss_epoch, optimizer, pbar)
+
+    # DEBUG + PSNR + SSIM #
+    loss_batch_cum = 0
+    for i, pos_batch in enumerate(batches):
+        h_idx = pos_batch[:, 0].long()
+        w_idx = pos_batch[:, 1].long()
+        x = input_mapping(pos_batch, B)
+        y = image[h_idx, w_idx]
+
+        _, out = net_ensemble.forward(x)
+        pred_img_ensemble[h_idx, w_idx] = out.detach()
+
+        loss = criterion(out, y)
+        loss.backward()
+        loss_batch_cum += loss.item()
+    loss_last_epoch = loss_batch_cum / len(batches)
+    metrics_manager.log_ensemble_stage(P, stage + 1, net_ensemble, loss_last_epoch, optimizer, image, pred_img_ensemble)
+
     return lr_ensemble
 
 
@@ -240,7 +260,6 @@ def train(net_ensemble, P, B, image, criterion, start_stage, batches):
 
         if stage > 0:
             lr_ensemble = fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, lr_ensemble, metrics_manager)
-            metrics_manager.print_ensemble_stage()
         if save_checkpoints:
             save_checkpoint(PATH_CHECKPOINT, net_ensemble, None, None, stage + 1, B, P)
             if os.path.isfile(PATH_CHECKPOINT):
@@ -249,9 +268,9 @@ def train(net_ensemble, P, B, image, criterion, start_stage, batches):
 
         img_grad_weak = (img_grad_weak - img_grad_weak.min()) * 1 / (img_grad_weak.max() - img_grad_weak.min())
         pred_img_weak = (pred_img_weak - pred_img_weak.min()) * 1 / (pred_img_weak.max() - pred_img_weak.min())
-        cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/_grad_{stage + 1}.png', (img_grad_weak.cpu().numpy() * 255))
-        cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/_weak_{stage + 1}.png', (pred_img_weak.cpu().numpy() * 255))
-        cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/_ensemble_{stage + 1}.png', (pred_img_ensemble.cpu().numpy() * 255))
+        cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/error/_grad_{stage + 1}.png', (img_grad_weak.cpu().numpy() * 255))
+        cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/pred_weak/_weak_{stage + 1}.png', (pred_img_weak.cpu().numpy() * 255))
+        cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/pred/_ensemble_{stage + 1}.png', (pred_img_ensemble.cpu().numpy() * 255))
     save_ensemble_final(net_ensemble, batches, B)
     metrics_manager.log_ensemble_summary()
 
@@ -291,6 +310,12 @@ if __name__ == '__main__':
     PATH_CHECKPOINT = os.path.join(OUT_ROOT, FOLDER, "checkpoint.pth")
     PATH_ONNX = os.path.join(OUT_ROOT, FOLDER, "net_ensemble.onnx")
     PATH_B = os.path.join(OUT_ROOT, FOLDER, "B")
+    if not os.path.isdir(os.path.join(OUT_ROOT, FOLDER, "error")):
+        os.mkdir(os.path.join(OUT_ROOT, FOLDER, "error"))
+    if not os.path.isdir(os.path.join(OUT_ROOT, FOLDER, "pred")):
+        os.mkdir(os.path.join(OUT_ROOT, FOLDER, "pred"))
+    if not os.path.isdir(os.path.join(OUT_ROOT, FOLDER, "pred_weak")):
+        os.mkdir(os.path.join(OUT_ROOT, FOLDER, "pred_weak"))
 
     WANDB_CFG = {
         "entity": "a-di",

@@ -82,6 +82,7 @@ hparams_xgboost = {
     'subsample': 1,
     'desired_psnr': 38
 }
+
 # TODO:
 # check if loss is correct - OK
 # move scale into P - OK
@@ -90,11 +91,9 @@ hparams_xgboost = {
 # add tunable n_layers - OK
 # check support for gon model - OK
 # add more metrics and organize them - OK
-# log network model memory size - OK?
-# try without input mapping
-# compare imageRegression with fourier-feature-networks repo
-# implement checkpoints saving and loading
-# save final results and models of best runs
-# TODO: clean code to also work with zero correction epochs
-# log n_parameters in xgboost
-# save rescaled image in wandb
+# log network model memory size - OK
+# implement checkpoints saving and loading - OK
+# log n_parameters in xgboost - OK
+# try without input mapping - OK
+# compare imageRegression with fourier-feature-networks repo - OK?
+# clean code to also work with zero correction epochs - OK

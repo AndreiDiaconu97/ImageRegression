@@ -58,7 +58,7 @@ def load_checkpoint(path, model, optimizer, is_grownet=False):
     return epoch, loss, B, P
 
 
-def get_paramas_num(model):
+def get_params_num(model):
     return sum(p.numel() for p in model.parameters())
 
 
@@ -127,7 +127,7 @@ def batch_generator_in_memory(P, device, shuffle=False):
 #                 yield torch.tensor([y, x]).unsqueeze(dim=0)
 #
 #     elif P["batch_sampling_mode"] == BatchSamplingMode.sequence.name:
-#         batch_ids = range(P["n_batches"])  # FIXME: probably wrong
+#         batch_ids = range(P["n_batches"])  # probably wrong
 #         if shuffle:
 #             batch_ids = list(batch_ids)
 #             random.shuffle(batch_ids)

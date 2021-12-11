@@ -1,7 +1,6 @@
 import os
 import pickle
 from datetime import timedelta
-
 import onnxmltools
 from onnxconverter_common import FloatTensorType
 from xgboost.core import EarlyStopException
