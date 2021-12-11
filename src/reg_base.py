@@ -9,7 +9,7 @@ from torchinfo import summary
 from torchmetrics import SSIM
 from torchvision import transforms
 from tqdm import tqdm
-from utils import input_mapping, get_psnr, batch_generator_in_memory, image_preprocess, get_model, get_optimizer, get_paramas_num
+from utils import input_mapping, get_psnr, batch_generator_in_memory, image_preprocess, get_model, get_optimizer, get_paramas_num, save_checkpoint, load_checkpoint
 import cv2
 import enum
 import matplotlib.pyplot as plt
@@ -85,16 +85,16 @@ class MetricsManager:
         })
 
 
-def train(model, P, image, optimizer, criterion, batches, schedulers):
+def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, schedulers):
     model.train()
     h, w, channels = P["image_shape"]
     metrics_manager = MetricsManager()
-    B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
 
     pred_img = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
 
     last_t = time.time()
-    pbar = tqdm(range(P["epochs"]), unit=" epoch", desc=f"Training")
+    last_check_t = time.time() - 30
+    pbar = tqdm(range(start_epoch, P["epochs"]), unit=" epoch", desc=f"Training")
     for epoch in pbar:
         loss_batch_cum = 0
         for i, pos_batch in enumerate(batches):
@@ -122,27 +122,36 @@ def train(model, P, image, optimizer, criterion, batches, schedulers):
             y_pred = model(input_mapping(pos_batch, B))
             pred_img[h_idx, w_idx] = y_pred.detach()
 
-        elapsed = time.time() - last_t
-        if (elapsed > 1) and (epoch + 1) % 1 == 0:
+        if (epoch + 1) % 1 == 0 and (time.time() - last_t > 1):
             last_t = time.time()
             # print(f'epoch {epoch + 1}/{P["epochs"]}, loss={actual_loss:.8f}, psnr={model_psnr:.2f}, ssim={model_ssim:.2f} lr={optimizer.param_groups[0]["lr"]:.7f}')
             metrics_manager.log_metrics(P, epoch + 1, model, loss_epoch, optimizer, image, pred_img, pbar)
             cv2.imwrite(OUT_ROOT + f'/base/sample_{epoch + 1}.png', (pred_img.cpu().numpy() * 255))  # .reshape((h, w, channels)))
 
-        if (epoch + 1) == P["epochs"]:
-            cv2.imwrite(OUT_ROOT + f'/f_{epoch + 1}_' + "_".join([
-                "base",
-                "M", P["model"],
-                "lr", str(P["lr"]),
-                "Bsize", str(P["batch_size"]),
-                "Bscale", str(P["B_scale"]),
-                "OP", P["optimizer"]
-            ]) + '.png', (pred_img.cpu().numpy() * 255))  # .reshape((h, w, channels)))
+        if save_checkpoints and (time.time() - last_check_t > 10):
+            last_check_t = time.time()
+            save_checkpoint(PATH_CHECKPOINT, model, optimizer, loss, epoch, B)
+            if os.path.isfile(PATH_CHECKPOINT):
+                wandb.log({"checkpoint(KB)": os.path.getsize(PATH_CHECKPOINT) / 1000})
+            # wandb.save(PATH_CHECKPOINT)
+            print("Checkpoint saved")
 
     # TODO: save onnx model + B to WANDB
-    # torch.onnx.export(model, input_mapping(pos_batch, B), OUT_ROOT + f'/base/model_base.onnx', input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
-    # np.save(OUT_ROOT + "/base/B", B.cpu().numpy())
     metrics_manager.log_final_metrics()
+    torch.onnx.export(model, input_mapping(pos_batch, B), PATH_ONNX, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
+    np.save(PATH_B, B.cpu().numpy())
+    wandb.save(PATH_ONNX)
+    wandb.save(PATH_B + ".npy")
+
+    cv2.imwrite(OUT_ROOT + "/" + "_".join([
+        "base",
+        "EP", str(P["epochs"]),
+        "M", P["model"],
+        "lr", str(P["lr"]),
+        "batchS", str(P["batch_size"]),
+        "Bscale", str(P["B_scale"]),
+        "OP", P["optimizer"]
+    ]) + '.png', (pred_img.cpu().numpy() * 255))
 
 
 def main():
@@ -165,16 +174,30 @@ def main():
         "plateau": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
     }
 
+    start_epoch = 0
+    loss = None
+    B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
+    if get_checkpoint and os.path.isfile(PATH_CHECKPOINT):
+        start_epoch, loss, B = load_checkpoint(PATH_CHECKPOINT, model, optimizer)
+        print("Checkpoint laded")
+
     batches = batch_generator_in_memory(P, device, shuffle=P["shuffle_batches"])
-    with wandb.init(project="image_regression_final", dir="../out", config=P, **WANDB_CFG):
+    with wandb.init(project="image_regression_final", dir=OUT_ROOT, config=P, **WANDB_CFG):
         print(wandb.config)
         # summary(model, input_size=(P["batch_size"], P["hidden_size"] * 2))
         wandb.watch(model, criterion, log="all")  # log="all", log_freq=10, log_graph=True
-        train(model, P, image, optimizer, criterion, batches, schedulers)
+        train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, schedulers)
 
 
 if __name__ == '__main__':
     start = time.time()
+    get_checkpoint = False
+    save_checkpoints = True
+    FOLDER = "base"
+    PATH_CHECKPOINT = os.path.join(OUT_ROOT, FOLDER, "checkpoint.pth")
+    PATH_ONNX = os.path.join(OUT_ROOT, FOLDER, "model_base.onnx")
+    PATH_B = os.path.join(OUT_ROOT, FOLDER, "B")
+
     WANDB_CFG = {
         "entity": "a-di",
         "mode": "online",  # ["online", "offline", "disabled"]
@@ -183,8 +206,5 @@ if __name__ == '__main__':
         "job_type": None,
         "id": None
     }
-
-    get_checkpoint = False
-    save_checkpoints = False
     main()
     print("seconds: ", time.time() - start)

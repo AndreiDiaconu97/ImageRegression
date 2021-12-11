@@ -30,6 +30,34 @@ def input_mapping(x, B):
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
 
+def save_checkpoint(path, model, optimizer, loss, epoch, B, P=None):
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': None if not optimizer else optimizer.state_dict(),
+        'loss': loss,
+        'B': B,
+        'P': P
+    }, path)
+
+
+def load_checkpoint(path, model, optimizer, is_grownet=False):
+    checkpoint = torch.load(path)
+    loss = checkpoint['loss']
+    epoch = checkpoint['epoch']
+    B = checkpoint['B']
+    P = checkpoint['P']
+
+    if is_grownet:
+        model.load_state_dict(checkpoint['model_state_dict'], P)
+    else:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    if optimizer:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    return epoch, loss, B, P
+
+
 def get_paramas_num(model):
     return sum(p.numel() for p in model.parameters())
 

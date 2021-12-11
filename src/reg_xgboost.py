@@ -76,7 +76,7 @@ if __name__ == '__main__':
     # TRAIN #
     channels_pred = {"R": None, "G": None, "B": None}
     models = {"R": None, "G": None, "B": None}
-    with wandb.init(project="image_regression_final", **WANDB_CFG, dir="../out", config=P):
+    with wandb.init(project="image_regression_final", **WANDB_CFG, dir=OUT_ROOT, config=P):
         for c in channels_pred:
             model = xgb.train(P, xgtrains[c], num_boost_round=P["num_boost_round"], evals=[(xgtrains[c], 'Train')], verbose_eval=False,
                               callbacks=[metrics_callback(c), early_stop_execution])

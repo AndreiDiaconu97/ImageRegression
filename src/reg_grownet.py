@@ -1,10 +1,11 @@
+import os
 from datetime import timedelta
 
 from config.default import OUT_ROOT, device, hparams_grownet, init_P, INPUT_PATH
 from torch import nn
 from torchmetrics.functional import ssim
 from tqdm import tqdm
-from utils import input_mapping, get_optimizer, batch_generator_in_memory, get_psnr, image_preprocess, get_model, get_paramas_num
+from utils import input_mapping, get_optimizer, batch_generator_in_memory, get_psnr, image_preprocess, get_model, get_paramas_num, save_checkpoint, load_checkpoint
 from utils.grownet import DynamicNet
 import cv2
 import numpy as np
@@ -51,6 +52,9 @@ class MetricsManager:
             "Weak/n_params": _n_params
         }, commit=True)
 
+    def print_ensemble_stage(self):
+        print(f'Ensemble_MSE: {self.ensemble_mse: .5f}, Ensemble_PSNR: {self.ensemble_psnr: .5f}, Ensemble_SSIM: {self.ensemble_ssim: .5f}, Boost rate: {self.ensemble_boost_rate:.4f}\n')
+
     def log_ensemble_epoch(self, P, epoch, stage, net_ensemble, loss_epoch, optimizer, image, pred_image, pbar=None):
         h, w, channels = P["image_shape"]
         self.ensemble_stage = stage
@@ -92,8 +96,6 @@ class MetricsManager:
             "Final/boost_rate": self.ensemble_boost_rate,
             "Final/n_params": self.n_params
         }, commit=True)
-        print("FINISH:")
-        print(f'\tEnsemble_MSE: {self.ensemble_mse: .5f}, Ensemble_PSNR: {self.ensemble_psnr: .5f}, Ensemble_SSIM: {self.ensemble_ssim: .5f}, Boost rate: {self.ensemble_boost_rate:.4f}\n')
 
 
 def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_grad_weak, criterion, metrics_manager):
@@ -145,7 +147,7 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
     #     lr_ensemble /= 2
     #     optimizer.param_groups[0]["lr"] = lr_ensemble
 
-    if P["epochs_per_correction"] == 0:  # just predict
+    if P["epochs_per_correction"] == 0:  # FIXME: refactor this s**t
         loss_batch_cum = 0
         for pos_batch in batches:
             h_idx = pos_batch[:, 0].long()
@@ -193,11 +195,10 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
     return lr_ensemble
 
 
-def train(net_ensemble, P, image, batches, criterion):
+def train(net_ensemble, P, B, image, criterion, start_stage, batches):
     net_ensemble.to_train()
     h, w, channels = P["image_shape"]
     metrics_manager = MetricsManager()
-    B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
 
     img_grad_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
     pred_img_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
@@ -205,12 +206,18 @@ def train(net_ensemble, P, image, batches, criterion):
 
     # train new model and append to ensemble
     lr_ensemble = P["lr_ensemble"]
-    for stage in range(P["num_nets"]):
+    for stage in range(start_stage, P["num_nets"]):
         weak_model = train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_grad_weak, criterion, metrics_manager)
         net_ensemble.add(weak_model)
 
         if stage > 0:
             lr_ensemble = fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, lr_ensemble, metrics_manager)
+            metrics_manager.print_ensemble_stage()
+        if save_checkpoints:
+            save_checkpoint(PATH_CHECKPOINT, net_ensemble, None, None, stage + 1, B, P)
+            if os.path.isfile(PATH_CHECKPOINT):
+                wandb.log({"checkpoint(KB)": os.path.getsize(PATH_CHECKPOINT) / 1000})
+            # wandb.save(PATH_CHECKPOINT)
 
         img_grad_weak = (img_grad_weak - img_grad_weak.min()) * 1 / (img_grad_weak.max() - img_grad_weak.min())
         pred_img_weak = (pred_img_weak - pred_img_weak.min()) * 1 / (pred_img_weak.max() - pred_img_weak.min())
@@ -233,16 +240,29 @@ def main():
     net_ensemble = DynamicNet(c0, P["boost_rate"])
     criterion = nn.MSELoss()
 
+    start_stage = 0
+    B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
+    if get_checkpoint and os.path.isfile(PATH_CHECKPOINT):
+        start_stage, _, B, P = load_checkpoint(PATH_CHECKPOINT, net_ensemble, None, is_grownet=True)
+        net_ensemble.to(device)
+        print("Checkpoint loaded")
+
     batches = batch_generator_in_memory(P, device, shuffle=P["shuffle_batches"])
-    with wandb.init(project="image_regression_final", **WANDB_CFG, dir="../out", config=P):
+    with wandb.init(project="image_regression_final", **WANDB_CFG, dir=OUT_ROOT, config=P):
         print(wandb.config)
         # wandb.watch(net_ensemble, criterion, log="all")  # log="all", log_freq=10, log_graph=True
-        train(net_ensemble, P, image, batches, criterion)
+        train(net_ensemble, P, B, image, criterion, start_stage, batches)
 
 
 if __name__ == '__main__':
     start = time.time()
-    # os.environ["WANDB_DIR"] = "../runs"
+    get_checkpoint = False
+    save_checkpoints = True
+    FOLDER = "grownet"
+    PATH_CHECKPOINT = os.path.join(OUT_ROOT, FOLDER, "checkpoint.pth")
+    PATH_ONNX = os.path.join(OUT_ROOT, FOLDER, "net_ensemble.onnx")
+    PATH_B = os.path.join(OUT_ROOT, FOLDER, "B")
+
     WANDB_CFG = {
         "entity": "a-di",
         "mode": "online",  # ["online", "offline", "disabled"]

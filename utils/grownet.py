@@ -3,6 +3,8 @@ import torch
 # import pickle
 import torch.nn as nn
 
+from utils import get_model
+
 
 class ForwardType(Enum):
     SIMPLE = 0
@@ -11,7 +13,7 @@ class ForwardType(Enum):
     GRADIENT = 3
 
 
-class DynamicNet(nn.Module):
+class DynamicNet:
     def __init__(self, c0, lr):
         super(DynamicNet, self).__init__()
         self.models = []
@@ -21,6 +23,18 @@ class DynamicNet(nn.Module):
 
     def add(self, model):
         self.models.append(model)
+
+    def state_dict(self):
+        state_dicts = []
+        for m in self.models:
+            state_dicts.append(m.state_dict())
+        return state_dicts
+
+    def load_state_dict(self, state_dicts, P):
+        for i in range(len(state_dicts)):
+            model = get_model(P, i)
+            self.models.append(model)
+            self.models[i].load_state_dict(state_dicts[i])
 
     def parameters(self, recurse=True):
         params = []
@@ -37,6 +51,10 @@ class DynamicNet(nn.Module):
     def to_cuda(self):
         for m in self.models:
             m.cuda()
+
+    def to(self, device):
+        for m in self.models:
+            m.to(device)
 
     def to_eval(self):
         for m in self.models:
