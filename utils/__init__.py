@@ -63,7 +63,7 @@ def get_paramas_num(model):
 
 
 def get_psnr(pred, target):
-    return 10 * torch.log10((torch.max(pred) ** 2) / torch.mean((pred - target) ** 2))
+    return 10 * torch.log10((1 ** 2) / torch.mean((pred - target) ** 2))
 
 
 def get_model(P, stage=0):

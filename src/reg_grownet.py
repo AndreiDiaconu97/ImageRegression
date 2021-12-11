@@ -1,3 +1,4 @@
+import glob
 import os
 from datetime import timedelta
 
@@ -12,6 +13,16 @@ import numpy as np
 import time
 import torch
 import wandb
+
+
+def save_ensemble_final(net_ensemble, batches, B):
+    for i, model in enumerate(net_ensemble.models):
+        f_path = f"{PATH_ONNX.removesuffix('net_ensemble.onnx')}weak_{i}.onnx"
+        x = input_mapping(batches[0], B)
+        middle_feat, out = net_ensemble.forward(x)
+        input_shape = x if i == 0 else (x, middle_feat)
+        torch.onnx.export(model, input_shape, f_path, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
+    np.save(PATH_B, B.cpu().numpy())
 
 
 class MetricsManager:
@@ -87,6 +98,11 @@ class MetricsManager:
         }, commit=True)
 
     def log_ensemble_summary(self):
+        onnx_weak_s = 0
+        onnx_weak_files = glob.glob(f'{os.path.join(OUT_ROOT, FOLDER)}/*weak*.onnx')
+        for f in onnx_weak_files:
+            onnx_weak_s += os.path.getsize(f)
+
         wandb.log({
             "Final/stage": self.ensemble_stage,
             "Final/lr": self.ensemble_lr,
@@ -94,7 +110,11 @@ class MetricsManager:
             "Final/ssim": self.ensemble_ssim,
             "Final/loss": self.ensemble_mse,
             "Final/boost_rate": self.ensemble_boost_rate,
-            "Final/n_params": self.n_params
+            "Final/n_params": self.n_params,
+            "Final/model(KB)": os.path.getsize(PATH_CHECKPOINT) / 1000,
+            "Final/onnx(KB)": onnx_weak_s / 1000,
+            "image": wandb.Image(f'{OUT_ROOT}/{FOLDER}/_ensemble_{self.ensemble_stage}.png'),
+            "image_error": wandb.Image(f'{OUT_ROOT}/{FOLDER}/_grad_{self.ensemble_stage}.png')
         }, commit=True)
 
 
@@ -106,19 +126,19 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
     pbar = tqdm(range(P["epochs_per_stage"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: weak model training", unit=" epoch")
     for epoch in pbar:
         loss_batch_cum = 0
+        middle_features = []
         for pos_batch in batches:
             h_idx = pos_batch[:, 0].long()
             w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch.to(device), B)
+            x = input_mapping(pos_batch, B)  # pos_batch.to(device)
             y = image[h_idx, w_idx]
 
             middle_feat, out = net_ensemble.forward(x)
+            middle_features.append(middle_feat)
             grad_direction = -(out - y)  # grad_direction = y / (1.0 + torch.exp(y * out))
             img_grad_weak[h_idx, w_idx] = grad_direction.detach()
 
             _, out = model(x, middle_feat)
-            pred_img_weak[h_idx, w_idx] = out.detach()
-            # make_dot(loss, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(f"_model_{stage + 1}", format="svg")
 
             loss = criterion(net_ensemble.boost_rate * out, grad_direction)
             loss.backward()
@@ -131,6 +151,14 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
             optimizer.step()
             model.zero_grad()
         scheduler_plateau.step(loss)
+
+        for i, pos_batch in enumerate(batches):
+            h_idx = pos_batch[:, 0].long()
+            w_idx = pos_batch[:, 1].long()
+            x = input_mapping(pos_batch, B)
+            _, out = model(x, middle_features[i])
+            pred_img_weak[h_idx, w_idx] = out.detach()
+            # make_dot(loss, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(f"_model_{stage + 1}", format="svg")
 
         loss_epoch = loss_batch_cum / len(batches)
         metrics_manager.log_weak_epoch(P, epoch + 1, stage + 1, model, loss_epoch, optimizer, img_grad_weak, pred_img_weak, pbar)
@@ -152,11 +180,11 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
         for pos_batch in batches:
             h_idx = pos_batch[:, 0].long()
             w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch.to(device), B)
+            x = input_mapping(pos_batch, B)
             y = image[h_idx, w_idx]
 
             _, out = net_ensemble.forward(x)
-            pred_img_ensemble[h_idx, w_idx] = out.detach()
+            pred_img_ensemble[h_idx, w_idx] = out.detach()  # FIXME: put in separate loop
 
             loss = criterion(out, y)
             # loss.backward()
@@ -172,11 +200,11 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
         for pos_batch in batches:
             h_idx = pos_batch[:, 0].long()
             w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch.to(device), B)
+            x = input_mapping(pos_batch, B)
             y = image[h_idx, w_idx]
 
             _, out = net_ensemble.forward(x)  # TODO: check forward_grad()
-            pred_img_ensemble[h_idx, w_idx] = out.detach()
+            pred_img_ensemble[h_idx, w_idx] = out.detach()  # FIXME: put in separate loop
 
             loss = criterion(out, y)
             loss.backward()
@@ -221,9 +249,10 @@ def train(net_ensemble, P, B, image, criterion, start_stage, batches):
 
         img_grad_weak = (img_grad_weak - img_grad_weak.min()) * 1 / (img_grad_weak.max() - img_grad_weak.min())
         pred_img_weak = (pred_img_weak - pred_img_weak.min()) * 1 / (pred_img_weak.max() - pred_img_weak.min())
-        cv2.imwrite(OUT_ROOT + f'/grownet/_grad_{stage + 1}.png', (img_grad_weak.cpu().numpy() * 255))
-        cv2.imwrite(OUT_ROOT + f'/grownet/_weak_{stage + 1}.png', (pred_img_weak.cpu().numpy() * 255))
-        cv2.imwrite(OUT_ROOT + f'/grownet/_ensemble_{stage + 1}.png', (pred_img_ensemble.cpu().numpy() * 255))
+        cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/_grad_{stage + 1}.png', (img_grad_weak.cpu().numpy() * 255))
+        cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/_weak_{stage + 1}.png', (pred_img_weak.cpu().numpy() * 255))
+        cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/_ensemble_{stage + 1}.png', (pred_img_ensemble.cpu().numpy() * 255))
+    save_ensemble_final(net_ensemble, batches, B)
     metrics_manager.log_ensemble_summary()
 
 
@@ -232,7 +261,7 @@ def main():
 
     image = cv2.imread(INPUT_PATH)
     image = image_preprocess(image, P).to(device)
-    cv2.imwrite(OUT_ROOT + '/grownet/sample.png', image.cpu().numpy() * 255)
+    cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample.png', image.cpu().numpy() * 255)
 
     init_P(P, image)
 

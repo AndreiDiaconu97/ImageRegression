@@ -81,7 +81,11 @@ class MetricsManager:
             "Final/loss": self.loss,
             "Final/psnr": self.psnr,
             "Final/ssim": self.ssim,
-            "Final/n_params": self.n_params
+            "Final/n_params": self.n_params,
+            "Final/model(KB)": os.path.getsize(PATH_CHECKPOINT) / 1000,
+            "Final/onnx(KB)": os.path.getsize(PATH_ONNX) / 1000,
+            "image": wandb.Image(OUT_ROOT + f'/base/sample_{self.epoch}.png'),
+            "image_error": wandb.Image(OUT_ROOT + f'/base/error_{self.epoch}.png')
         })
 
 
@@ -92,16 +96,16 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
 
     pred_img = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
 
-    last_t = time.time()
-    last_check_t = time.time() - 30
+    last_t, last_check_t = 0, 0
     pbar = tqdm(range(start_epoch, P["epochs"]), unit=" epoch", desc=f"Training")
     for epoch in pbar:
         loss_batch_cum = 0
         for i, pos_batch in enumerate(batches):
             h_idx = pos_batch[:, 0].long()
             w_idx = pos_batch[:, 1].long()
+            x = input_mapping(pos_batch, B)
 
-            y_pred = model(input_mapping(pos_batch, B))
+            y_pred = model(x)
             loss = criterion(image[h_idx, w_idx], y_pred)
             loss.backward()
             loss_batch_cum += loss.item()
@@ -119,29 +123,32 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
         for i, pos_batch in enumerate(batches):  # save prediction
             h_idx = pos_batch[:, 0].long()
             w_idx = pos_batch[:, 1].long()
-            y_pred = model(input_mapping(pos_batch, B))
+            x = input_mapping(pos_batch, B)
+
+            y_pred = model(x)
             pred_img[h_idx, w_idx] = y_pred.detach()
 
         if (epoch + 1) % 1 == 0 and (time.time() - last_t > 1):
             last_t = time.time()
             # print(f'epoch {epoch + 1}/{P["epochs"]}, loss={actual_loss:.8f}, psnr={model_psnr:.2f}, ssim={model_ssim:.2f} lr={optimizer.param_groups[0]["lr"]:.7f}')
             metrics_manager.log_metrics(P, epoch + 1, model, loss_epoch, optimizer, image, pred_img, pbar)
+            img_error = image - pred_img
+            img_error = (img_error - img_error.min()) * 1 / (img_error.max() - img_error.min())
+            cv2.imwrite(OUT_ROOT + f'/base/error_{epoch + 1}.png', (img_error.cpu().numpy() * 255))  # .reshape((h, w, channels)))
             cv2.imwrite(OUT_ROOT + f'/base/sample_{epoch + 1}.png', (pred_img.cpu().numpy() * 255))  # .reshape((h, w, channels)))
 
         if save_checkpoints and (time.time() - last_check_t > 10):
             last_check_t = time.time()
             save_checkpoint(PATH_CHECKPOINT, model, optimizer, loss, epoch, B)
-            if os.path.isfile(PATH_CHECKPOINT):
-                wandb.log({"checkpoint(KB)": os.path.getsize(PATH_CHECKPOINT) / 1000})
+            wandb.log({"checkpoint(KB)": os.path.getsize(PATH_CHECKPOINT) / 1000})
             # wandb.save(PATH_CHECKPOINT)
             print("Checkpoint saved")
 
-    # TODO: save onnx model + B to WANDB
-    metrics_manager.log_final_metrics()
-    torch.onnx.export(model, input_mapping(pos_batch, B), PATH_ONNX, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
+    torch.onnx.export(model, input_mapping(batches[0], B), PATH_ONNX, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
     np.save(PATH_B, B.cpu().numpy())
-    wandb.save(PATH_ONNX)
-    wandb.save(PATH_B + ".npy")
+    metrics_manager.log_final_metrics()
+    # wandb.save(PATH_ONNX)
+    # wandb.save(PATH_B + ".npy")
 
     cv2.imwrite(OUT_ROOT + "/" + "_".join([
         "base",
@@ -208,3 +215,5 @@ if __name__ == '__main__':
     }
     main()
     print("seconds: ", time.time() - start)
+
+# TODO: try printing same model with different B

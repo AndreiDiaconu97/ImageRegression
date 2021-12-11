@@ -80,7 +80,7 @@ hparams_xgboost = {
     'reg_lambda': 0.01,
     'scale': 0.1,
     'subsample': 1,
-    'desired_psnr': 35
+    'desired_psnr': 38
 }
 # TODO:
 # check if loss is correct - OK
@@ -97,3 +97,4 @@ hparams_xgboost = {
 # save final results and models of best runs
 # TODO: clean code to also work with zero correction epochs
 # log n_parameters in xgboost
+# save rescaled image in wandb

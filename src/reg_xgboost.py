@@ -1,4 +1,7 @@
+import os
 import pickle
+from datetime import timedelta
+
 import onnxmltools
 from onnxconverter_common import FloatTensorType
 from xgboost.core import EarlyStopException
@@ -35,6 +38,8 @@ def metrics_callback(channel):
                 "ssim": _ssim,
             })
 
+            print(f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Channel {channel}, - loss: {mse:.5f}, psnr: {psnr:.5f}/{P['desired_psnr']}, ssim: {_ssim:.5f}")
+
             if psnr >= P["desired_psnr"]:
                 raise EarlyStopException(env.iteration)
 
@@ -43,24 +48,25 @@ def metrics_callback(channel):
 
 if __name__ == '__main__':
     start = time.time()
+    l = {'time': 0}
+
+    FOLDER = "xgboost"
+    PATH_MODEL = os.path.join(OUT_ROOT, FOLDER, "xgboost_RGBmodels.pkl")
+    PATH_ONNX = os.path.join(OUT_ROOT, FOLDER, "xgboost.onnx")
     WANDB_CFG = {
         "entity": "a-di",
         "mode": "online",  # ["online", "offline", "disabled"]
         "tags": ["xgboost"],
-        "group": "exp_1",
+        "group": None,
         "job_type": None,
         "id": None
     }
 
-    # SETUP #
-    l = {'time': time.time()}
-    WANDB_USER = "a-di"
-    WANDB_MODE = "online"  # ["online", "offline", "disabled"]
     P = hparams_xgboost
 
     image = cv2.imread(INPUT_PATH)
     image = image_preprocess(image, P)
-    cv2.imwrite(OUT_ROOT + '/sample.png', image.numpy() * 255)
+    cv2.imwrite(os.path.join(OUT_ROOT, FOLDER, 'sample.png'), image.numpy() * 255)
     P["image_shape"] = image.shape
     h, w, channels = P["image_shape"]
 
@@ -85,30 +91,36 @@ if __name__ == '__main__':
             # pred_img = torch.Tensor(channels_pred[c]).view(h, w, 1).numpy()
             # cv2.imwrite(OUT_ROOT + f'/xgboost_{c}.png', (pred_img * 255))
 
-    ypred_RGB = torch.tensor(np.asarray([channels_pred[c] for c in channels_pred])).permute((1, 0))
-    y = image.view(-1, channels)
+        ypred_RGB = torch.tensor(np.asarray([channels_pred[c] for c in channels_pred])).permute((1, 0))
+        y = image.view(-1, channels)
 
-    # LOG summary metrics #
-    wandb.log({
-        "Final/loss": torch.mean((ypred_RGB - y) ** 2),
-        "Final/psnr": get_psnr(ypred_RGB, y),
-        "Final/ssim": ssim(ypred_RGB.reshape(1, channels, h, w), y.view(1, channels, h, w)),
-    })
+        pickle.dump({"models": models, "B": B}, open(PATH_MODEL, "wb"))
+        np.save(OUT_ROOT + "/B", B)
+        onnx_s = 0
+        for c in models:
+            initial_type = [('mapped2D', FloatTensorType([None, P["input_layer_size"]]))]
+            onx = onnxmltools.convert.convert_xgboost(models[c], initial_types=initial_type)
+            f_path = f"{PATH_ONNX.removesuffix('.onnx')}{c}.onnx"
+            with open(f_path, "wb") as f:
+                f.write(onx.SerializeToString())
+            onnx_s += os.path.getsize(f_path) / 1000
 
-    # save output #
-    pred_img = ypred_RGB.view(h, w, channels).numpy()
+        pred_img = ypred_RGB.view(h, w, channels).numpy()
+        img_error = image - pred_img
+        img_error = ((img_error - img_error.min()) * 1 / (img_error.max() - img_error.min())).numpy()
+        cv2.imwrite(os.path.join(OUT_ROOT, FOLDER, 'xgboost_RGB.png'), pred_img * 255)
+        cv2.imwrite(os.path.join(OUT_ROOT, FOLDER, 'xgboost_error.png'), img_error * 255)
 
-    # FIXME: save onnx model + B
-    # num_features = 32
-    # initial_type = [('mapped_coordinates', FloatTensorType([1, num_features]))]
-    # onx = onnxmltools.convert.convert_xgboost(models["R"], initial_types=initial_type)
-    # with open(OUT_ROOT + "/xgboost.onnx", "wb") as f:
-    #     f.write(onx.SerializeToString())
-    #
-    # pickle.dump(models, open(OUT_ROOT + f"/xgboost_RGBmodels.pkl", "wb"))
-    # np.save(OUT_ROOT + "/B", B)
+        wandb.log({
+            "Final/loss": torch.mean((ypred_RGB - y) ** 2),
+            "Final/psnr": get_psnr(ypred_RGB, y),
+            "Final/ssim": ssim(ypred_RGB.reshape(1, channels, h, w), y.view(1, channels, h, w)),
+            "Final/model(KB)": os.path.getsize(PATH_MODEL) / 1000,
+            "Final/onnx(KB)": onnx_s,
+            "image": wandb.Image(cv2.cvtColor(pred_img, cv2.COLOR_BGR2RGB) * 255),
+            "image_error": wandb.Image(cv2.cvtColor(img_error, cv2.COLOR_BGR2RGB) * 255)
+        })
 
-    cv2.imwrite(OUT_ROOT + f'/xgboost_RGB.png', (pred_img * 255))
     print("seconds: ", time.time() - start)
 
 # OLD MODEL #####################################################################
