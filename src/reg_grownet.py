@@ -1,11 +1,12 @@
 import glob
 import os
 from datetime import timedelta
-from config.default import OUT_ROOT, device, hparams_grownet, init_P, INPUT_PATH
+from torchviz import make_dot
+from config.default import OUT_ROOT, device, hparams_grownet, init_P, INPUT_PATH, device_batches, device_image, device_pred_img
 from torch import nn
 from torchmetrics.functional import ssim
 from tqdm import tqdm
-from utils import input_mapping, get_optimizer, batch_generator_in_memory, get_psnr, image_preprocess, get_model, get_params_num, save_checkpoint, load_checkpoint
+from utils import input_mapping, get_optimizer, batch_generator, get_psnr, image_preprocess, get_model, get_params_num, save_checkpoint, load_checkpoint
 from utils.grownet import DynamicNet
 import cv2
 import numpy as np
@@ -15,9 +16,9 @@ import wandb
 
 
 def save_ensemble_final(net_ensemble, batches, B):
+    x = input_mapping(batches[0].to(device), B)
     for i, model in enumerate(net_ensemble.models):
         f_path = f"{PATH_ONNX.removesuffix('net_ensemble.onnx')}weak_{i}.onnx"
-        x = input_mapping(batches[0], B)
         middle_feat, out = net_ensemble.forward(x)
         input_shape = x if i == 0 else (x, middle_feat)
         torch.onnx.export(model, input_shape, f_path, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
@@ -56,23 +57,24 @@ class MetricsManager:
         }, commit=True)
 
     @staticmethod
-    def log_weak_stage(P, stage, image, pred_image):
+    def log_weak_stage(P, stage, loss_epoch, image, pred_image):
         h, w, channels = P["image_shape"]
         _psnr = get_psnr(pred_image, image).item()
         _ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()
 
         wandb.log({
             "stage": stage,
+            "Weak/loss": loss_epoch,
             "Weak/psnr": _psnr,
             "Weak/ssim": _ssim,
         }, commit=True)
 
-        print(f'Weak_PSNR: {_psnr: .5f}, Weak_SSIM: {_ssim: .5f}')
+        print(f'Weak_MSE: {loss_epoch:.5f}, Weak_PSNR: {_psnr:.5f}, Weak_SSIM: {_ssim:.5f}')
 
     def log_ensemble_epoch(self, epoch, stage, net_ensemble, loss_epoch, optimizer, pbar=None):
         self.ensemble_stage = stage
         self.n_params = get_params_num(net_ensemble)
-        self.ensemble_boost_rate = net_ensemble.boost_rate.item()
+        self.ensemble_boost_rate = net_ensemble.boost_rate.detach().item()
         self.ensemble_lr = optimizer.param_groups[0]["lr"]
         self.ensemble_mse = loss_epoch  # np.sqrt(loss_stage / (P["n_batches"] * P["epochs_per_correction"]))
 
@@ -97,7 +99,7 @@ class MetricsManager:
         h, w, channels = P["image_shape"]
         self.ensemble_stage = stage
         self.n_params = get_params_num(net_ensemble)
-        self.ensemble_boost_rate = net_ensemble.boost_rate.item()
+        self.ensemble_boost_rate = net_ensemble.boost_rate.detach().item()
         self.ensemble_lr = optimizer.param_groups[0]["lr"]
         self.ensemble_mse = loss_epoch  # np.sqrt(loss_stage / (P["n_batches"] * P["epochs_per_correction"]))
         self.ensemble_psnr = get_psnr(pred_image, image).item()
@@ -113,7 +115,7 @@ class MetricsManager:
             "Ensemble/ssim": self.ensemble_ssim,
         }, commit=True)
 
-        print(f'Ensemble_MSE: {self.ensemble_mse: .5f}, Ensemble_PSNR: {self.ensemble_psnr: .5f}, Ensemble_SSIM: {self.ensemble_ssim: .5f}, Boost rate: {self.ensemble_boost_rate:.4f}\n')
+        print(f'Ensemble_MSE: {self.ensemble_mse:.5f}, Ensemble_PSNR: {self.ensemble_psnr:.5f}, Ensemble_SSIM: {self.ensemble_ssim:.5f}, Boost rate: {self.ensemble_boost_rate:.4f}\n')
 
     def log_ensemble_summary(self):
         onnx_weak_s = 0
@@ -143,21 +145,20 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
     scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
 
     pbar = tqdm(range(P["epochs_per_stage"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: weak model training", unit=" epoch")
-    middle_features = []
     for epoch in pbar:
         loss_batch_cum = 0
-        middle_features.clear()
         for pos_batch in batches:
             h_idx = pos_batch[:, 0].long()
             w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch, B)  # pos_batch.to(device)
+            x = input_mapping(pos_batch.to(device), B)
             y = image[h_idx, w_idx]
 
-            middle_feat, out = net_ensemble.forward(x)
-            middle_features.append(middle_feat)
-            grad_direction = -(out - y)  # grad_direction = y / (1.0 + torch.exp(y * out))
-            img_grad_weak[h_idx, w_idx] = grad_direction.detach()
+            middle_feat, out_ensemble = net_ensemble.forward_grad(x)
+            out_ensemble = out_ensemble.detach()  # TODO: detach necessary!?
+            if middle_feat is not None:
+                middle_feat = middle_feat.detach()  # TODO: detach necessary!?
 
+            grad_direction = -(out_ensemble - y.to(device))  # grad_direction = y / (1.0 + torch.exp(y * out))
             _, out = model(x, middle_feat)
 
             loss = criterion(net_ensemble.boost_rate * out, grad_direction)
@@ -166,37 +167,54 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
 
             if not P["acc_gradients"]:
                 optimizer.step()
-                model.zero_grad()
+                optimizer.zero_grad()
         if P["acc_gradients"]:
             optimizer.step()
-            model.zero_grad()
+            optimizer.zero_grad()
         scheduler_plateau.step(loss)
 
         loss_epoch = loss_batch_cum / len(batches)
         metrics_manager.log_weak_epoch(P, epoch + 1, stage + 1, model, loss_epoch, optimizer, pbar)
 
-    # DEBUG + PSNR + SSIM #
-    for i, pos_batch in enumerate(batches):
-        h_idx = pos_batch[:, 0].long()
-        w_idx = pos_batch[:, 1].long()
-        x = input_mapping(pos_batch, B)
-        _, out = model(x, middle_features[i])
-        pred_img_weak[h_idx, w_idx] = out.detach()
-        # make_dot(loss, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(f"_model_{stage + 1}", format="svg")
-    metrics_manager.log_weak_stage(P, stage + 1, img_grad_weak, pred_img_weak)
+    # LAST LOGGING PASS + PSNR + SSIM #
+    with torch.no_grad():
+        loss_batch_cum = 0
+        for i, pos_batch in enumerate(batches):
+            h_idx = pos_batch[:, 0].long()
+            w_idx = pos_batch[:, 1].long()
+            x = input_mapping(pos_batch.to(device), B)
+            y = image[h_idx, w_idx]
+
+            middle_feat, out_ensemble = net_ensemble.forward_grad(x)
+            grad_direction = -(out_ensemble.to(device) - y.to(device))
+            img_grad_weak[h_idx, w_idx] = grad_direction.to(device_pred_img)
+
+            _, out = model(x, middle_feat)
+            pred_img_weak[h_idx, w_idx] = out.to(device_pred_img)
+
+            loss = criterion(net_ensemble.boost_rate * out, grad_direction)
+            loss_batch_cum += loss
+
+            # make_dot(loss, params=dict(model.named_parameters()), show_attrs=True, show_saved=True).render(f"_model_{stage + 1}", format="svg")
+        loss_epoch = loss_batch_cum / len(batches)
+        metrics_manager.log_weak_stage(P, stage + 1, loss_epoch, img_grad_weak, pred_img_weak)
 
     return model
 
 
 def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, lr_ensemble, metrics_manager):
     lr_scaler = 1
-    optimizer = get_optimizer(net_ensemble.parameters(), lr_ensemble / lr_scaler, P["optimizer"])
-    # scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
+    optimizer = get_optimizer([
+        {'params': net_ensemble.parameters()},
+        # {'params': [net_ensemble.boost_rate], 'lr': 1e-1}
+    ], lr_ensemble / lr_scaler, P["optimizer"])
+    # optimizer_boost_rate = get_optimizer([net_ensemble.boost_rate], 1e-2, P["optimizer"])
+    # scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=1, factor=.1, verbose=False)
 
-    # if stage % 15 == 0:
-    #     # lr_scaler *= 2
-    #     lr_ensemble /= 2
-    #     optimizer.param_groups[0]["lr"] = lr_ensemble
+    if stage % 1 == 0:
+        # lr_scaler *= 2
+        lr_ensemble /= 1.4
+        optimizer.param_groups[0]["lr"] = lr_ensemble
 
     pbar = tqdm(range(P["epochs_per_correction"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: fully corrective step", unit=" epoch")
     for epoch in pbar:
@@ -204,42 +222,45 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
         for pos_batch in batches:
             h_idx = pos_batch[:, 0].long()
             w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch, B)
+            x = input_mapping(pos_batch.to(device), B)
             y = image[h_idx, w_idx]
 
-            _, out = net_ensemble.forward(x)  # TODO: check forward_grad()
-            loss = criterion(out, y)
+            _, out = net_ensemble.forward_grad(x)
+            loss = criterion(out, y.to(device))
             loss.backward()
             loss_batch_cum += loss.item()
 
             if not P["acc_gradients"]:
-                optimizer.zero_grad()
                 optimizer.step()
+                optimizer.zero_grad()
+        # optimizer_boost_rate.step()
+        # optimizer_boost_rate.zero_grad()
+
         if P["acc_gradients"]:
-            optimizer.zero_grad()
             optimizer.step()
+            optimizer.zero_grad()
         # scheduler_plateau.step(loss)
+        lr_ensemble = optimizer.param_groups[0]['lr']
 
         loss_epoch = loss_batch_cum / len(batches)
         metrics_manager.log_ensemble_epoch(epoch + 1, stage + 1, net_ensemble, loss_epoch, optimizer, pbar)
 
-    # DEBUG + PSNR + SSIM #
-    loss_batch_cum = 0
-    for i, pos_batch in enumerate(batches):
-        h_idx = pos_batch[:, 0].long()
-        w_idx = pos_batch[:, 1].long()
-        x = input_mapping(pos_batch, B)
-        y = image[h_idx, w_idx]
+    # LAST LOGGING PASS + PSNR + SSIM #
+    with torch.no_grad():
+        loss_batch_cum = 0
+        for pos_batch in batches:
+            h_idx = pos_batch[:, 0].long()
+            w_idx = pos_batch[:, 1].long()
+            x = input_mapping(pos_batch.to(device), B)
+            y = image[h_idx, w_idx]
 
-        _, out = net_ensemble.forward(x)
-        pred_img_ensemble[h_idx, w_idx] = out.detach()
+            _, out = net_ensemble.forward_grad(x)
+            pred_img_ensemble[h_idx, w_idx] = out.to(device_pred_img)
 
-        loss = criterion(out, y)
-        loss.backward()
-        loss_batch_cum += loss.item()
-    loss_last_epoch = loss_batch_cum / len(batches)
-    metrics_manager.log_ensemble_stage(P, stage + 1, net_ensemble, loss_last_epoch, optimizer, image, pred_img_ensemble)
-
+            loss = criterion(out, y.to(device))
+            loss_batch_cum += loss.item()
+        loss_last_epoch = loss_batch_cum / len(batches)
+        metrics_manager.log_ensemble_stage(P, stage + 1, net_ensemble, loss_last_epoch, optimizer, image, pred_img_ensemble)
     return lr_ensemble
 
 
@@ -248,9 +269,9 @@ def train(net_ensemble, P, B, image, criterion, start_stage, batches):
     h, w, channels = P["image_shape"]
     metrics_manager = MetricsManager()
 
-    img_grad_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
-    pred_img_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
-    pred_img_ensemble = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
+    img_grad_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device_pred_img)
+    pred_img_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device_pred_img)
+    pred_img_ensemble = torch.Tensor(np.empty(shape=(h, w, channels))).to(device_pred_img)
 
     # train new model and append to ensemble
     lr_ensemble = P["lr_ensemble"]
@@ -279,12 +300,15 @@ def main():
     P = hparams_grownet
 
     image = cv2.imread(INPUT_PATH)
-    image = image_preprocess(image, P).to(device)
+    image = image_preprocess(image, P).to(device_image)
     cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample.png', image.cpu().numpy() * 255)
 
     init_P(P, image)
 
-    c0 = torch.mean(image, dim=[0, 1])  # torch.Tensor([0.0, 0.0, 0.0]).to(device)
+    if P["model"] == 'siren':
+        c0 = torch.mean(image, dim=[0, 1]).to(device)
+    else:
+        c0 = torch.Tensor([0.0, 0.0, 0.0]).to(device)
     net_ensemble = DynamicNet(c0, P["boost_rate"])
     criterion = nn.MSELoss()
 
@@ -295,7 +319,7 @@ def main():
         net_ensemble.to(device)
         print("Checkpoint loaded")
 
-    batches = batch_generator_in_memory(P, device, shuffle=P["shuffle_batches"])
+    batches = batch_generator(P, device_batches, shuffle=P["shuffle_batches"])
     with wandb.init(project="image_regression_final", **WANDB_CFG, dir=OUT_ROOT, config=P):
         print(wandb.config)
         # wandb.watch(net_ensemble, criterion, log="all")  # log="all", log_freq=10, log_graph=True

@@ -1,5 +1,5 @@
 from adabound import adabound
-from config.default import OUT_ROOT, device, INPUT_PATH, hparams_base, init_P
+from config.default import OUT_ROOT, device, INPUT_PATH, hparams_base, init_P, device_batches, device_pred_img, device_image
 from torch import nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -8,7 +8,7 @@ from torchmetrics import SSIM
 from torchmetrics.functional import ssim
 from torchvision import transforms
 from tqdm import tqdm
-from utils import input_mapping, get_psnr, batch_generator_in_memory, image_preprocess, get_model, get_optimizer, get_params_num, save_checkpoint, load_checkpoint
+from utils import input_mapping, get_psnr, batch_generator, image_preprocess, get_model, get_optimizer, get_params_num, save_checkpoint, load_checkpoint
 import cv2
 import numpy as np
 import os
@@ -19,6 +19,27 @@ import torchvision
 import wandb
 
 
+def validate_model(batches, image, pred_img, B, model, criterion):
+    with torch.no_grad():
+        loss_batch_cum = 0
+        for i, pos_batch in enumerate(batches):  # save prediction
+            h_idx = pos_batch[:, 0].long()
+            w_idx = pos_batch[:, 1].long()
+            x = input_mapping(pos_batch.to(device), B)
+            y_pred = model(x)
+            loss_batch_cum += criterion(image[h_idx, w_idx].to(device), y_pred)
+            pred_img[h_idx, w_idx] = y_pred.to(device_pred_img)
+        loss_epoch = loss_batch_cum / len(batches)
+    return loss_epoch.item()
+
+
+def save_image_out(image, pred_img, epoch):
+    img_error = image - pred_img
+    img_error = (img_error - img_error.min()) * 1 / (img_error.max() - img_error.min())
+    cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/error_{epoch}.png', (img_error.cpu().numpy() * 255))
+    cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample_{epoch}.png', (pred_img.cpu().numpy() * 255))
+
+
 class MetricsManager:
     def __init__(self):
         self.n_params = None
@@ -27,6 +48,15 @@ class MetricsManager:
         self.loss = None
         self.psnr = None
         self.ssim = None
+
+    def log_loss(self, epoch, loss_epoch):
+        self.loss = loss_epoch
+        self.epoch = epoch
+
+        wandb.log({
+            "epoch": self.epoch,
+            "loss": self.loss,
+        }, commit=True)
 
     def log_metrics(self, P, epoch, model, loss_epoch, optimizer, image, pred_image, pbar=None):
         h, w, channels = P["image_shape"]
@@ -39,7 +69,7 @@ class MetricsManager:
 
         if pbar:
             pbar.set_postfix({
-                "loss": loss_epoch,
+                "loss": self.loss,
                 "lr": optimizer.param_groups[0]['lr'],
                 "psnr": self.psnr,
                 "ssim": self.ssim,
@@ -75,7 +105,7 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
     h, w, channels = P["image_shape"]
     metrics_manager = MetricsManager()
 
-    pred_img = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
+    pred_img = torch.Tensor(np.empty(shape=(h, w, channels))).to(device_pred_img)
 
     last_t, last_check_t = 0, 0
     pbar = tqdm(range(start_epoch, P["epochs"]), unit=" epoch", desc=f"Training")
@@ -84,10 +114,10 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
         for i, pos_batch in enumerate(batches):
             h_idx = pos_batch[:, 0].long()
             w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch, B)
+            x = input_mapping(pos_batch.to(device), B)
 
             y_pred = model(x)
-            loss = criterion(image[h_idx, w_idx], y_pred)
+            loss = criterion(image[h_idx, w_idx].to(device), y_pred)
             loss.backward()
             loss_batch_cum += loss.item()
 
@@ -100,32 +130,27 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
         if schedulers["plateau"]:
             schedulers["plateau"].step(loss)
         loss_epoch = loss_batch_cum / len(batches)
+        metrics_manager.log_loss(epoch + 1, loss_epoch)
 
-        if (epoch + 1) % 1 == 0 and (time.time() - last_t > 1):
-            # DEBUG + PSNR + SSIM #
-            for i, pos_batch in enumerate(batches):  # save prediction
-                h_idx = pos_batch[:, 0].long()
-                w_idx = pos_batch[:, 1].long()
-                x = input_mapping(pos_batch, B)
-                y_pred = model(x)
-                pred_img[h_idx, w_idx] = y_pred.detach()
+        with torch.no_grad():
+            if (epoch + 1) % 1 == 0 and (time.time() - last_t > 1):
+                loss_epoch = validate_model(batches, image, pred_img, B, model, criterion)
+                metrics_manager.log_metrics(P, epoch + 1, model, loss_epoch, optimizer, image, pred_img, pbar)
+                save_image_out(image, pred_img, epoch + 1)
+                last_t = time.time()
 
-            # print(f'epoch {epoch + 1}/{P["epochs"]}, loss={actual_loss:.8f}, psnr={model_psnr:.2f}, ssim={model_ssim:.2f} lr={optimizer.param_groups[0]["lr"]:.7f}')
-            metrics_manager.log_metrics(P, epoch + 1, model, loss_epoch, optimizer, image, pred_img, pbar)
-            img_error = image - pred_img
-            img_error = (img_error - img_error.min()) * 1 / (img_error.max() - img_error.min())
-            cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/error_{epoch + 1}.png', (img_error.cpu().numpy() * 255))  # .reshape((h, w, channels)))
-            cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample_{epoch + 1}.png', (pred_img.cpu().numpy() * 255))  # .reshape((h, w, channels)))
-            last_t = time.time()
+            if save_checkpoints and (time.time() - last_check_t > 10):
+                last_check_t = time.time()
+                save_checkpoint(PATH_CHECKPOINT, model, optimizer, loss, epoch, B)
+                wandb.log({"checkpoint(KB)": os.path.getsize(PATH_CHECKPOINT) / 1000})
+                # wandb.save(PATH_CHECKPOINT)
+                print("Checkpoint saved")
 
-        if save_checkpoints and (time.time() - last_check_t > 10):
-            last_check_t = time.time()
-            save_checkpoint(PATH_CHECKPOINT, model, optimizer, loss, epoch, B)
-            wandb.log({"checkpoint(KB)": os.path.getsize(PATH_CHECKPOINT) / 1000})
-            # wandb.save(PATH_CHECKPOINT)
-            print("Checkpoint saved")
+    loss_epoch = validate_model(batches, image, pred_img, B, model, criterion)
+    metrics_manager.log_metrics(P, P["epochs"], model, loss_epoch, optimizer, image, pred_img)
 
-    torch.onnx.export(model, input_mapping(batches[0], B), PATH_ONNX, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
+    save_image_out(image, pred_img, P["epochs"])
+    torch.onnx.export(model, input_mapping(batches[0].to(device), B), PATH_ONNX, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
     np.save(PATH_B, B.cpu().numpy())
     metrics_manager.log_final_metrics()
     # wandb.save(PATH_ONNX)
@@ -146,7 +171,7 @@ def main():
     P = hparams_base
 
     image = cv2.imread(INPUT_PATH)
-    image = image_preprocess(image, P).to(device)
+    image = image_preprocess(image, P).to(device_image)
     cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample.png', image.cpu().numpy() * 255)
 
     init_P(P, image)
@@ -167,12 +192,12 @@ def main():
     B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
     if get_checkpoint and os.path.isfile(PATH_CHECKPOINT):
         start_epoch, loss, B, _ = load_checkpoint(PATH_CHECKPOINT, model, optimizer)
-        print("Checkpoint laded")
+        print("Checkpoint loaded")
 
-    batches = batch_generator_in_memory(P, device, shuffle=P["shuffle_batches"])
+    batches = batch_generator(P, device=device_batches, shuffle=P["shuffle_batches"])
     with wandb.init(project="image_regression_final", dir=OUT_ROOT, config=P, **WANDB_CFG):
         print(wandb.config)
-        # summary(model, input_size=(P["batch_size"], P["hidden_size"] * 2))
+        summary(model, input_size=(P["batch_size"], P["input_layer_size"]))
         wandb.watch(model, criterion, log="all")  # log="all", log_freq=10, log_graph=True
         train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, schedulers)
 
@@ -196,3 +221,5 @@ if __name__ == '__main__':
     }
     main()
     print("seconds: ", time.time() - start)
+
+# TODO: remap coordinated to [0,1] so its easier to calculate intermediate values

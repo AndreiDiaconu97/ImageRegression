@@ -19,7 +19,10 @@ class DynamicNet:
         self.models = []
         self.c0 = c0
         self.lr = lr
-        self.boost_rate = nn.Parameter(torch.tensor(lr, requires_grad=True, device="cuda"))
+        self.boost_rate = torch.tensor(lr, requires_grad=False, device="cuda")
+
+    def __repr__(self):
+        return str(self.models)
 
     def add(self, model):
         self.models.append(model)
@@ -41,12 +44,21 @@ class DynamicNet:
         for m in self.models:
             params.extend(m.parameters())
 
+        # params.append(self.boost_rate)
+        return params
+
+    def named_parameters(self, recurse=True):
+        params = []
+        for m in self.models:
+            params.extend(m.named_parameters())
+
         params.append(self.boost_rate)
         return params
 
     def zero_grad(self, set_to_none=False):
         for m in self.models:
             m.zero_grad()
+        self.boost_rate._grad = None  # Is this correct?
 
     def to_cuda(self):
         for m in self.models:

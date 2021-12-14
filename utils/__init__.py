@@ -97,8 +97,13 @@ def get_optimizer(model_params, lr, optim_name):
     # optimizer = adabound.AdaBound(model.parameters(), lr, final_lr=1)
 
 
-def batch_generator_in_memory(P, device, shuffle=False):
+def batch_generator(P, device, shuffle=False):
     h, w, channels = P["image_shape"]
+
+    # ys = np.linspace(0, 1, h, endpoint=False)
+    # xs = np.linspace(0, 1, w, endpoint=False)
+    # positions = np.stack(np.meshgrid(ys, xs), -1)
+    # positions = torch.from_numpy(positions).to(device)
 
     positions = []
     for y in range(h):

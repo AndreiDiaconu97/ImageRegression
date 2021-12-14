@@ -6,7 +6,7 @@ from onnxconverter_common import FloatTensorType
 from xgboost.core import EarlyStopException
 from config.default import OUT_ROOT, init_P, INPUT_PATH, hparams_xgboost
 from torchmetrics.functional import ssim
-from utils import batch_generator_in_memory, input_mapping, image_preprocess, get_psnr
+from utils import batch_generator, input_mapping, image_preprocess, get_psnr
 from xgboost import callback
 import cv2
 import numpy as np
@@ -69,7 +69,7 @@ if __name__ == '__main__':
     P["image_shape"] = image.shape
     h, w, channels = P["image_shape"]
 
-    batches = batch_generator_in_memory(P, 'cpu', shuffle=False)
+    batches = batch_generator(P, 'cpu', shuffle=False)
     B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2))
     xtrain = input_mapping(batches[0], B)
     xgtrains = {

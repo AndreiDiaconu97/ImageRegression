@@ -6,7 +6,7 @@ import onnx
 import onnxruntime as rt
 import torch
 from config.default import OUT_ROOT, hparams_xgboost, hparams_base
-from utils import batch_generator_in_memory, input_mapping, BatchSamplingMode
+from utils import batch_generator, input_mapping, BatchSamplingMode
 
 
 def main():
@@ -41,7 +41,7 @@ if __name__ == '__main__':
     h, w, channels = P["image_shape"]
     positions = []
 
-    batches = batch_generator_in_memory(P, 'cpu', shuffle=False)
+    batches = batch_generator(P, 'cpu', shuffle=False)
     # B = np.load(OUT_ROOT + "/B.npy")
     B = np.load(OUT_ROOT + "/base/B.npy")
     # B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2))
