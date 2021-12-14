@@ -1,0 +1,41 @@
+project: image_compression_grownet
+WANDB_DIR: "../runs"
+program: ImageRegression_GrowNet.py
+
+method: random
+metric:
+  goal: maximize
+  name: Summary/Ensemble_psnr
+name: grownet_weakPlateauF0.1P2_ensemblePlateauF0.1P1_noReset
+parameters:
+  epochs_per_stage:
+    distribution: uniform
+    min: 0
+    max: 100
+  epochs_per_correction:
+    distribution: uniform
+    min: 0
+    max: 100
+  optimizer:
+    values: [ adam, adamW ]
+  lr_model:
+    distribution: log_uniform
+    min: -11.5129255
+    max: -2.30258509
+  lr_ensemble:
+    distribution: log_uniform
+    min: -11.5129255
+    max: -2.30258509
+  hidden_size:
+    values: [8, 16, 32, 64, 128, 256]
+  hidden_layers:
+    values: [1, 2, 3]
+  acc_gradients:
+    values: [True, False]
+  model:
+    values: [siren, nn]
+
+
+#early_terminate:
+#  type: hyperband
+#  min_iter: 3

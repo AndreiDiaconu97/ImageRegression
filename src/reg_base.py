@@ -25,10 +25,10 @@ def validate_model(P, batches, image, pred_img, B, model, criterion):
             y = image[h_idx, w_idx]
 
             y_pred = model(x)
-            loss_batch_cum += criterion(y.to(device), y_pred)
+            loss_batch_cum += criterion(y.to(device), y_pred).item()
             pred_img[h_idx, w_idx] = y_pred.to(device_pred_img)
         loss_epoch = loss_batch_cum / len(batches)
-    return loss_epoch.item()
+    return loss_epoch
 
 
 def save_image_out(image, pred_img, epoch):
@@ -56,18 +56,16 @@ class MetricsManager:
             "loss": self.loss,
         }, commit=True)
 
-    def log_metrics(self, P, epoch, model, loss_epoch, optimizer, image, pred_image, pbar=None):
+    def log_metrics(self, P, epoch, model, optimizer, image, pred_image, pbar=None):
         h, w, channels = P["image_shape"]
         self.n_params = get_params_num(model)
         self.epoch = epoch
         self.lr = optimizer.param_groups[0]['lr']
-        self.loss = loss_epoch
         self.psnr = get_psnr(pred_image, image).item()
         self.ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()
 
         if pbar:
             pbar.set_postfix({
-                "loss": self.loss,
                 "lr": optimizer.param_groups[0]['lr'],
                 "psnr": self.psnr,
                 "ssim": self.ssim,
@@ -77,7 +75,6 @@ class MetricsManager:
         wandb.log({
             "epoch": self.epoch,
             "lr": self.lr,
-            "loss": self.loss,
             "psnr": self.psnr,
             "ssim": self.ssim,
             "n_params": self.n_params
@@ -118,8 +115,8 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
 
             y_pred = model(x)
             loss = criterion(y.to(device), y_pred)
-            loss.backward()
             loss_batch_cum += loss.item()
+            loss.backward()
 
             if not P["acc_gradients"]:
                 optimizer.step()
@@ -136,7 +133,7 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
         with torch.no_grad():
             if (epoch + 1) % 1 == 0 and (time.time() - last_t > 1):
                 loss_epoch = validate_model(P, batches, image, pred_img, B, model, criterion)
-                metrics_manager.log_metrics(P, epoch + 1, model, loss_epoch, optimizer, image, pred_img, pbar)
+                metrics_manager.log_metrics(P, epoch + 1, model, optimizer, image, pred_img, pbar)
                 save_image_out(image, pred_img, epoch + 1)
                 last_t = time.time()
 
