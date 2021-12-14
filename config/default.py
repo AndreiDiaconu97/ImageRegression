@@ -19,7 +19,7 @@ device_pred_img = device
 
 USE_LESS_VRAM = False
 if USE_LESS_VRAM:
-    # device_batches = 'cpu'  # SUGGEST LEAVING DISABLED
+    # device_batches = 'cpu'  # enable only as last resort
     device_image = 'cpu'
     device_pred_img = 'cpu'
 
@@ -41,7 +41,8 @@ def init_P(P, image):
 
 hparams_grownet = {
     'type': 'grownet',
-    'B_scale': 0.07,
+    'B_scale': 20,
+    'normalized_coordinates': True,
     'acc_gradients': False,
     'batch_sampling_mode': BatchSamplingMode.nth_element.name,
     'shuffle_batches': True,
@@ -56,12 +57,13 @@ hparams_grownet = {
     'model': 'siren',
     'num_nets': 30,
     'optimizer': 'adamW',
-    'scale': 0.1,
+    'scale': 0.2,
 }
 
 hparams_base = {
     'type': 'base',
-    'B_scale': 0.07,
+    'B_scale': 20,
+    'normalized_coordinates': True,
     'acc_gradients': False,
     'batch_sampling_mode': BatchSamplingMode.nth_element.name,
     'shuffle_batches': True,
@@ -69,7 +71,7 @@ hparams_base = {
     'epochs': 1000,
     'hidden_size': 256,
     'hidden_layers': 3,
-    'lr': 0.000728,  # [0.01, 0.0001],
+    'lr': 0.001,  # [0.01, 0.0001],
     'model': 'siren',
     'optimizer': 'adamW',
     'scale': 0.1,
@@ -108,6 +110,7 @@ hparams_xgboost = {
 # try without input mapping - OK
 # compare imageRegression with fourier-feature-networks repo - OK?
 # clean code to also work with zero correction epochs - OK
-# solve the grownet corrective step mystery
 # try forward_grad() without boostrate - OK
 # zero_grad order in fully corrective step may be wrong - OK
+# TODO: model seems to saturate at the end, maybe batch size and B is not that important
+# solve the grownet corrective step mystery

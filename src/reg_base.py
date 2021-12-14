@@ -1,33 +1,31 @@
 from adabound import adabound
 from config.default import OUT_ROOT, device, INPUT_PATH, hparams_base, init_P, device_batches, device_pred_img, device_image
 from torch import nn
-from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 from torchinfo import summary
-from torchmetrics import SSIM
 from torchmetrics.functional import ssim
-from torchvision import transforms
 from tqdm import tqdm
-from utils import input_mapping, get_psnr, batch_generator, image_preprocess, get_model, get_optimizer, get_params_num, save_checkpoint, load_checkpoint
+from utils import input_mapping, get_psnr, batch_generator, image_preprocess, get_model, get_optimizer, get_params_num, save_checkpoint, load_checkpoint, get_scaled_image
 import cv2
 import numpy as np
 import os
 import time
 import torch
-import torch.nn.functional as F
-import torchvision
 import wandb
 
 
-def validate_model(batches, image, pred_img, B, model, criterion):
+def validate_model(P, batches, image, pred_img, B, model, criterion):
     with torch.no_grad():
+        h, w, channels = P["image_shape"]
         loss_batch_cum = 0
-        for i, pos_batch in enumerate(batches):  # save prediction
-            h_idx = pos_batch[:, 0].long()
-            w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch.to(device), B)
+        for pos_batch in batches:  # save prediction
+            h_idx = pos_batch[:, 0]
+            w_idx = pos_batch[:, 1]
+            batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
+            x = input_mapping(batch, B)
+            y = image[h_idx, w_idx]
+
             y_pred = model(x)
-            loss_batch_cum += criterion(image[h_idx, w_idx].to(device), y_pred)
+            loss_batch_cum += criterion(y.to(device), y_pred)
             pred_img[h_idx, w_idx] = y_pred.to(device_pred_img)
         loss_epoch = loss_batch_cum / len(batches)
     return loss_epoch.item()
@@ -100,7 +98,7 @@ class MetricsManager:
         })
 
 
-def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, schedulers):
+def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, scheduler=None):
     model.train()
     h, w, channels = P["image_shape"]
     metrics_manager = MetricsManager()
@@ -112,12 +110,14 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
     for epoch in pbar:
         loss_batch_cum = 0
         for i, pos_batch in enumerate(batches):
-            h_idx = pos_batch[:, 0].long()
-            w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch.to(device), B)
+            h_idx = pos_batch[:, 0]
+            w_idx = pos_batch[:, 1]
+            batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
+            x = input_mapping(batch, B)
+            y = image[h_idx, w_idx]
 
             y_pred = model(x)
-            loss = criterion(image[h_idx, w_idx].to(device), y_pred)
+            loss = criterion(y.to(device), y_pred)
             loss.backward()
             loss_batch_cum += loss.item()
 
@@ -127,14 +127,15 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
         if P["acc_gradients"]:
             optimizer.step()
             optimizer.zero_grad()
-        if schedulers["plateau"]:
-            schedulers["plateau"].step(loss)
+        if scheduler:
+            scheduler.step(loss)
+        # optimizer.param_groups[0]['lr'] *= 0.95
         loss_epoch = loss_batch_cum / len(batches)
         metrics_manager.log_loss(epoch + 1, loss_epoch)
 
         with torch.no_grad():
             if (epoch + 1) % 1 == 0 and (time.time() - last_t > 1):
-                loss_epoch = validate_model(batches, image, pred_img, B, model, criterion)
+                loss_epoch = validate_model(P, batches, image, pred_img, B, model, criterion)
                 metrics_manager.log_metrics(P, epoch + 1, model, loss_epoch, optimizer, image, pred_img, pbar)
                 save_image_out(image, pred_img, epoch + 1)
                 last_t = time.time()
@@ -146,7 +147,7 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
                 # wandb.save(PATH_CHECKPOINT)
                 print("Checkpoint saved")
 
-    loss_epoch = validate_model(batches, image, pred_img, B, model, criterion)
+    loss_epoch = validate_model(P, batches, image, pred_img, B, model, criterion)
     metrics_manager.log_metrics(P, P["epochs"], model, loss_epoch, optimizer, image, pred_img)
 
     save_image_out(image, pred_img, P["epochs"])
@@ -183,9 +184,7 @@ def main():
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.01, steps_per_epoch=1, epochs=200, anneal_strategy='linear')
     # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda e: 0.95 ** e)
     # scheduler2 = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=0.00001)
-    schedulers = {
-        "plateau": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
-    }
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.25, verbose=False)
 
     start_epoch = 0
     loss = None
@@ -199,7 +198,10 @@ def main():
         print(wandb.config)
         summary(model, input_size=(P["batch_size"], P["input_layer_size"]))
         wandb.watch(model, criterion, log="all")  # log="all", log_freq=10, log_graph=True
-        train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, schedulers)
+        train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, scheduler)
+
+    pred_img = get_scaled_image(P, B, model, scale=5.0)
+    cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample_resized.png', (pred_img.cpu().numpy() * 255))
 
 
 if __name__ == '__main__':
@@ -222,4 +224,5 @@ if __name__ == '__main__':
     main()
     print("seconds: ", time.time() - start)
 
-# TODO: remap coordinated to [0,1] so its easier to calculate intermediate values
+# TODO: remap coordinates to [0,1] so its easier to calculate intermediate values
+# with remapped coordinates, now old B logs on wand are f**d

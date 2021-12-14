@@ -97,19 +97,44 @@ def get_optimizer(model_params, lr, optim_name):
     # optimizer = adabound.AdaBound(model.parameters(), lr, final_lr=1)
 
 
-def batch_generator(P, device, shuffle=False):
+def get_scaled_image(P, B, model, device='cpu', scale=1.0):
+    """
+    Model inference with custom size. If device!='cpu', using small batch
+    size is advised in order to avoid memory problems.
+    :param P: dictionary containing all run parameters
+    :param B: used for positional encoding
+    :param model: usually on GPU
+    :param device: for stuff like memorizing image
+    :param scale: image resizing factor
+    :return: image tensor
+    """
+    with torch.no_grad():
+        h, w, channels = P["image_shape"]
+        h = int(h * scale)
+        w = int(w * scale)
+
+        pred_img = torch.Tensor(np.empty(shape=(h, w, channels))).to(device)
+        batches = batch_generator(P, device, scale=scale, shuffle=P["shuffle_batches"])
+        for pos_batch in batches:
+            h_idx = pos_batch[:, 0]
+            w_idx = pos_batch[:, 1]
+            batch = torch.stack((h_idx / h, w_idx / w), dim=1).to("cuda")
+            x = input_mapping(batch, B)
+
+            y_pred = model(x)
+            pred_img[h_idx, w_idx] = y_pred.to(device)
+    return pred_img
+
+
+def batch_generator(P, device, scale=1.0, shuffle=False):
     h, w, channels = P["image_shape"]
+    h = int(h * scale)
+    w = int(w * scale)
 
-    # ys = np.linspace(0, 1, h, endpoint=False)
-    # xs = np.linspace(0, 1, w, endpoint=False)
-    # positions = np.stack(np.meshgrid(ys, xs), -1)
-    # positions = torch.from_numpy(positions).to(device)
-
-    positions = []
-    for y in range(h):
-        for x in range(w):
-            positions.append((y, x))
-    positions = torch.Tensor(positions).to(device)
+    ys = np.linspace(0, h, h, endpoint=False, dtype=np.int64)
+    xs = np.linspace(0, w, w, endpoint=False, dtype=np.int64)
+    positions = np.stack(np.meshgrid(ys, xs), 0).T.reshape(-1, 2)
+    positions = torch.from_numpy(positions).to(device)
 
     if not "batch_sampling_mode" in P or P["batch_sampling_mode"] == BatchSamplingMode.whole.name:
         batches = [positions]

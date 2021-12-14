@@ -6,7 +6,7 @@ from config.default import OUT_ROOT, device, hparams_grownet, init_P, INPUT_PATH
 from torch import nn
 from torchmetrics.functional import ssim
 from tqdm import tqdm
-from utils import input_mapping, get_optimizer, batch_generator, get_psnr, image_preprocess, get_model, get_params_num, save_checkpoint, load_checkpoint
+from utils import input_mapping, get_optimizer, batch_generator, get_psnr, image_preprocess, get_model, get_params_num, save_checkpoint, load_checkpoint, get_scaled_image
 from utils.grownet import DynamicNet
 import cv2
 import numpy as np
@@ -15,8 +15,12 @@ import torch
 import wandb
 
 
-def save_ensemble_final(net_ensemble, batches, B):
-    x = input_mapping(batches[0].to(device), B)
+def save_ensemble_final(net_ensemble, batches, P, B):
+    h, w, channels = P["image_shape"]
+    h_idx = batches[0][:, 0]
+    w_idx = batches[0][:, 1]
+    batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
+    x = input_mapping(batch, B)
     for i, model in enumerate(net_ensemble.models):
         f_path = f"{PATH_ONNX.removesuffix('net_ensemble.onnx')}weak_{i}.onnx"
         middle_feat, out = net_ensemble.forward(x)
@@ -140,6 +144,7 @@ class MetricsManager:
 
 
 def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_grad_weak, criterion, metrics_manager):
+    h, w, channels = P["image_shape"]
     model = get_model(P, stage).to(device)
     optimizer = get_optimizer(model.parameters(), P["lr_model"], P["optimizer"])
     scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=.1, verbose=False)
@@ -148,9 +153,10 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
     for epoch in pbar:
         loss_batch_cum = 0
         for pos_batch in batches:
-            h_idx = pos_batch[:, 0].long()
-            w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch.to(device), B)
+            h_idx = pos_batch[:, 0]
+            w_idx = pos_batch[:, 1]
+            batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
+            x = input_mapping(batch, B)
             y = image[h_idx, w_idx]
 
             middle_feat, out_ensemble = net_ensemble.forward_grad(x)
@@ -180,9 +186,10 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
     with torch.no_grad():
         loss_batch_cum = 0
         for i, pos_batch in enumerate(batches):
-            h_idx = pos_batch[:, 0].long()
-            w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch.to(device), B)
+            h_idx = pos_batch[:, 0]
+            w_idx = pos_batch[:, 1]
+            batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
+            x = input_mapping(batch, B)
             y = image[h_idx, w_idx]
 
             middle_feat, out_ensemble = net_ensemble.forward_grad(x)
@@ -203,6 +210,7 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
 
 
 def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, lr_ensemble, metrics_manager):
+    h, w, channels = P["image_shape"]
     lr_scaler = 1
     optimizer = get_optimizer([
         {'params': net_ensemble.parameters()},
@@ -220,9 +228,10 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
     for epoch in pbar:
         loss_batch_cum = 0
         for pos_batch in batches:
-            h_idx = pos_batch[:, 0].long()
-            w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch.to(device), B)
+            h_idx = pos_batch[:, 0]
+            w_idx = pos_batch[:, 1]
+            batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
+            x = input_mapping(batch, B)
             y = image[h_idx, w_idx]
 
             _, out = net_ensemble.forward_grad(x)
@@ -249,9 +258,10 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
     with torch.no_grad():
         loss_batch_cum = 0
         for pos_batch in batches:
-            h_idx = pos_batch[:, 0].long()
-            w_idx = pos_batch[:, 1].long()
-            x = input_mapping(pos_batch.to(device), B)
+            h_idx = pos_batch[:, 0]
+            w_idx = pos_batch[:, 1]
+            batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
+            x = input_mapping(batch, B)
             y = image[h_idx, w_idx]
 
             _, out = net_ensemble.forward_grad(x)
@@ -292,7 +302,7 @@ def train(net_ensemble, P, B, image, criterion, start_stage, batches):
         cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/error/_grad_{stage + 1}.png', (img_grad_weak.cpu().numpy() * 255))
         cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/pred_weak/_weak_{stage + 1}.png', (pred_img_weak.cpu().numpy() * 255))
         cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/pred/_ensemble_{stage + 1}.png', (pred_img_ensemble.cpu().numpy() * 255))
-    save_ensemble_final(net_ensemble, batches, B)
+    save_ensemble_final(net_ensemble, batches, P, B)
     metrics_manager.log_ensemble_summary()
 
 
@@ -324,6 +334,9 @@ def main():
         print(wandb.config)
         # wandb.watch(net_ensemble, criterion, log="all")  # log="all", log_freq=10, log_graph=True
         train(net_ensemble, P, B, image, criterion, start_stage, batches)
+
+    pred_img = get_scaled_image(P, B, net_ensemble, scale=5.0)
+    cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample_resized.png', (pred_img.cpu().numpy() * 255))
 
 
 if __name__ == '__main__':

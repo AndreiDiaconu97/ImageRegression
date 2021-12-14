@@ -105,6 +105,10 @@ class DynamicNet:
         prediction = sum(preds)
         return middle_feat_cum, self.c0 + self.boost_rate * prediction
 
+    def __call__(self, x):
+        _, out = self.forward_grad(x)
+        return out
+
     @classmethod
     def from_file(cls, path, builder):
         d = torch.load(path)
