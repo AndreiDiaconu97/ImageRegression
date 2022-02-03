@@ -8,7 +8,7 @@ class NN(nn.Module):  # [x,y]->[RGB]
         super(NN, self).__init__()
 
         layers = [nn.Linear(dim_in, hidden_size), nn.ReLU()]
-        for i in range(1, num_layers - 1):
+        for i in range(0, num_layers - 1):
             layers.append(nn.Linear(hidden_size, hidden_size))
             layers.append(nn.ReLU())
         layers.append(nn.Linear(hidden_size, 3))
@@ -43,7 +43,7 @@ class SirenLayer(nn.Module):
 
 def gon_model(input_dim, hidden_dim, num_layers):
     layers = [SirenLayer(input_dim, hidden_dim, is_first=True)]
-    for i in range(1, num_layers - 1):
+    for i in range(0, num_layers - 1):
         layers.append(SirenLayer(hidden_dim, hidden_dim))
     layers.append(SirenLayer(hidden_dim, 3, is_last=True))
 
@@ -55,7 +55,7 @@ class NN_grownet(nn.Module):  # [x,y]->[RGB]
         super(NN_grownet, self).__init__()
 
         layers = [nn.Linear(dim_in, hidden_size), nn.ReLU()]
-        for i in range(1, num_layers - 1):
+        for i in range(0, num_layers - 1):
             layers.append(nn.Linear(hidden_size, hidden_size))
             layers.append(nn.ReLU())
 
@@ -85,7 +85,7 @@ class SIREN_grownet(nn.Module):
     def __init__(self, dim_in, hidden_size, num_layers):
         super(SIREN_grownet, self).__init__()
         layers = [SirenLayer(dim_in, hidden_size, is_first=True)]
-        for i in range(1, num_layers - 1):
+        for i in range(0, num_layers - 1):
             layers.append(SirenLayer(hidden_size, hidden_size))
 
         self.model_part1 = nn.Sequential(*layers)

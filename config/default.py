@@ -10,7 +10,7 @@ from utils import BatchSamplingMode
 # torch.cuda.manual_seed_all(hash("so runs are repeatable") % 2**32 - 1)
 
 OUT_ROOT = "out"
-INPUT_PATH = "data/IMG_0201_DxO.jpg"
+INPUT_PATH = "data/mountains.jpg"
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device_batches = device
@@ -26,7 +26,10 @@ if USE_LESS_VRAM:
 
 def init_P(P, image):
     P["image_shape"] = image.shape
-    P["input_layer_size"] = P["hidden_size"] * 2
+    if not P["B_scale"]:
+        P["input_layer_size"] = 2
+    else:
+        P["input_layer_size"] = P["hidden_size"]
     P["use_less_vram"] = USE_LESS_VRAM
 
     if P["batch_sampling_mode"] == BatchSamplingMode.whole.name:
@@ -41,43 +44,83 @@ def init_P(P, image):
 
 hparams_grownet = {
     'type': 'grownet',
-    'B_scale': 30,
+    'B_scale': 30,  # set False for no posEnc # NOTE: consider w0=30 in Siren, with 4 hidden set w0=250 if not using positional encoding
     'normalized_coordinates': True,
-    'acc_gradients': True,
+    'acc_gradients': False,
     'batch_sampling_mode': BatchSamplingMode.nth_element.name,
     'shuffle_batches': True,
-    'batch_size': 10000,
+    'batch_size': 20000,
     'boost_rate': 1.0,
-    'epochs_per_correction': 50,
-    'epochs_per_stage': 50,
-    'hidden_size': 128,
+    'epochs_per_correction': 100,
+    'epochs_per_stage': 200,
+    'hidden_size': 512,
     'hidden_layers': 1,
-    'lr_ensemble': 0.001,
-    'lr_model': 0.001,
+    'lr_ensemble': 1e-4,
+    'lr_model': 1e-4,
     'model': 'siren',
-    'num_nets': 50,
+    'num_nets': 17,
     'optimizer': 'adamW',
-    'scale': 0.1,
+    'scale': 0.2,
 }
 
 hparams_base = {
+    'type': 'base',
+    'B_scale': 30,  # set False for no posEnc # NOTE: consider w0=30 in Siren, with 4 hidden set w0=250 if not using positional encoding
+    'normalized_coordinates': True,
+    'acc_gradients': False,
+    'batch_sampling_mode': BatchSamplingMode.nth_element.name,
+    'shuffle_batches': True,
+    'batch_size': 20000,
+    'epochs': 1000,
+    'hidden_size': 512,
+    'hidden_layers': 3,
+    'lr': 1e-4,  # [0.01, 0.0001],
+    'model': 'siren',
+    'optimizer': 'adamW',  # RMSprop, adam, adamW, SGD
+    'scale': 0.2,
+}
+
+#### EXPERIMENTS CONFIGS ################################################################
+
+hparams_grownet_baseline = {
+    'type': 'grownet',
+    'B_scale': 30,  # FIXME: consider w0 in Siren too
+    'normalized_coordinates': True,
+    'acc_gradients': False,
+    'batch_sampling_mode': BatchSamplingMode.nth_element.name,
+    'shuffle_batches': True,
+    'batch_size': 20000,
+    'boost_rate': 1.0,
+    'epochs_per_correction': 20,
+    'epochs_per_stage': 20,
+    'hidden_size': 256,
+    'hidden_layers': 1,
+    'lr_ensemble': 1e-4,
+    'lr_model': 1e-4,
+    'model': 'siren',
+    'num_nets': 17,
+    'optimizer': 'adamW',
+    'scale': 0.2,
+}
+
+hparams_base_baseline = {
     'type': 'base',
     'B_scale': 30,
     'normalized_coordinates': True,
     'acc_gradients': False,
     'batch_sampling_mode': BatchSamplingMode.nth_element.name,
     'shuffle_batches': True,
-    'batch_size': 10000,
+    'batch_size': 5000,
     'epochs': 1000,
-    'hidden_size': 256,
-    'hidden_layers': 3,
-    'lr': 0.001,  # [0.01, 0.0001],
+    'hidden_size': 512,
+    'hidden_layers': 4,
+    'lr': 1e-4,  # [0.01, 0.0001],
     'model': 'siren',
-    'optimizer': 'adamW',
-    'scale': 0.1,
+    'optimizer': 'adamW',  # RMSprop, adam, adamW, SGD
+    'scale': 0.2,
 }
 
-hparams_xgboost = {
+hparams_xgboost_baseline = {
     'type': 'xgboost',
     'B_scale': 0.03,
     'eval_metric': ['rmse'],  # 'mae'
@@ -91,10 +134,12 @@ hparams_xgboost = {
     'tree_method': 'gpu_hist',
     'objective': 'reg:squarederror',
     'reg_lambda': 0.01,
-    'scale': 0.1,
+    'scale': 0.2,
     'subsample': 1,
-    'desired_psnr': 38
+    'desired_psnr': 40
 }
+
+#########################################################################################
 
 # TODO:
 # check if loss is correct - OK

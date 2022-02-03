@@ -44,7 +44,7 @@ class DynamicNet:
         for m in self.models:
             params.extend(m.parameters())
 
-        params.append(self.boost_rate)
+        # params.append(self.boost_rate)
         return params
 
     def named_parameters(self, recurse=True):
@@ -58,7 +58,7 @@ class DynamicNet:
     def zero_grad(self, set_to_none=False):
         for m in self.models:
             m.zero_grad()
-        # self.boost_rate._grad = None  # Is this correct?
+        self.boost_rate._grad = None  # Is this correct?
 
     def to_cuda(self):
         for m in self.models:

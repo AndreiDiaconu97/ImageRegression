@@ -1,11 +1,17 @@
+import argparse
+import random
+import sys
+
+sys.path.append('C:/Users/USER/Documents/Programming/ImageRegression')
 import glob
 import os
 from datetime import timedelta
 from torchviz import make_dot
-from config.default import OUT_ROOT, device, hparams_grownet, init_P, INPUT_PATH, device_batches, device_image, device_pred_img
 from torch import nn
 from torchmetrics.functional import ssim
 from tqdm import tqdm
+import config.default
+from config.default import OUT_ROOT, device, hparams_grownet, init_P, INPUT_PATH, device_batches, device_image, device_pred_img
 from utils import input_mapping, get_optimizer, batch_generator, get_psnr, image_preprocess, get_model, get_params_num, save_checkpoint, load_checkpoint, get_scaled_image
 from utils.grownet import DynamicNet
 import cv2
@@ -20,13 +26,14 @@ def save_ensemble_final(net_ensemble, batches, P, B):
     h_idx = batches[0][:, 0]
     w_idx = batches[0][:, 1]
     batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
-    x = input_mapping(batch, B)
+    x = input_mapping(batch, B) if P["B_scale"] else batch
     for i, model in enumerate(net_ensemble.models):
         f_path = f"{PATH_ONNX.removesuffix('net_ensemble.onnx')}weak_{i}.onnx"
         middle_feat, out = net_ensemble.forward(x)
         input_shape = x if i == 0 else (x, middle_feat)
         torch.onnx.export(model, input_shape, f_path, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
-    np.save(PATH_B, B.cpu().numpy())
+    if B:
+        np.save(PATH_B, B.cpu().numpy())
 
 
 class MetricsManager:
@@ -99,15 +106,19 @@ class MetricsManager:
             "Ensemble/loss": self.ensemble_mse,
         }, commit=True)
 
-    def log_ensemble_stage(self, P, stage, loss_epoch, image, pred_image):
+    def log_ensemble_stage(self, P, stage, loss_epoch, image, pred_image, net_ensemble):
         h, w, channels = P["image_shape"]
         self.ensemble_stage = stage
         self.ensemble_mse = loss_epoch  # np.sqrt(loss_stage / (P["n_batches"] * P["epochs_per_correction"]))
         self.ensemble_psnr = get_psnr(pred_image, image).item()
         self.ensemble_ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()  # WARNING: takes a lot of memory
+        self.n_params = get_params_num(net_ensemble)
+        self.ensemble_boost_rate = net_ensemble.boost_rate.item()
 
         wandb.log({
             "stage": self.ensemble_stage,
+            "Ensemble/n_params": self.n_params,
+            "Ensemble/boost_rate": self.ensemble_boost_rate,
             "Ensemble/loss": self.ensemble_mse,
             "Ensemble/psnr": self.ensemble_psnr,
             "Ensemble/ssim": self.ensemble_ssim,
@@ -150,7 +161,7 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
             h_idx = pos_batch[:, 0]
             w_idx = pos_batch[:, 1]
             batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
-            x = input_mapping(batch, B)
+            x = input_mapping(batch, B) if P["B_scale"] else batch
             y = image[h_idx, w_idx]
 
             middle_feat, out_ensemble = net_ensemble.forward(x)
@@ -168,7 +179,7 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
             optimizer.step()
             optimizer.zero_grad()
         scheduler_plateau.step(loss)
-        P["lr_model"] = optimizer.param_groups[0]['lr']
+        # P["lr_model"] = optimizer.param_groups[0]['lr']
 
         loss_epoch = loss_batch_cum / len(batches)
         metrics_manager.log_weak_epoch(P, epoch + 1, stage + 1, model, loss_epoch, optimizer, pbar)
@@ -180,7 +191,7 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
             h_idx = pos_batch[:, 0]
             w_idx = pos_batch[:, 1]
             batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
-            x = input_mapping(batch, B)
+            x = input_mapping(batch, B) if P["B_scale"] else batch
             y = image[h_idx, w_idx]
 
             middle_feat, out_ensemble = net_ensemble.forward(x)
@@ -205,45 +216,46 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
     lr_scaler = 1
     optimizer = get_optimizer([
         {'params': net_ensemble.parameters()},
-        # {'params': [net_ensemble.boost_rate], 'lr': 1e-1}
+        # {'params': [net_ensemble.boost_rate], 'lr': 2}
     ], lr_ensemble / lr_scaler, P["optimizer"])
     # optimizer_boost_rate = get_optimizer([net_ensemble.boost_rate], 1e-2, P["optimizer"])
-    scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=1, factor=.5, verbose=False)
+    scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=.25, verbose=False)
 
     # if stage % 1 == 0:
     #     # lr_scaler *= 2
-    #     lr_ensemble /= 1.4
+    #     lr_ensemble *= 0.90
     #     optimizer.param_groups[0]["lr"] = lr_ensemble
 
-    pbar = tqdm(range(P["epochs_per_correction"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: fully corrective step", unit=" epoch")
-    for epoch in pbar:
-        loss_batch_cum = 0
-        for pos_batch in batches:
-            h_idx = pos_batch[:, 0]
-            w_idx = pos_batch[:, 1]
-            batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
-            x = input_mapping(batch, B)
-            y = image[h_idx, w_idx]
+    if P["epochs_per_correction"] > 0:
+        pbar = tqdm(range(P["epochs_per_correction"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: fully corrective step", unit=" epoch")
+        for epoch in pbar:
+            loss_batch_cum = 0
+            for pos_batch in batches:
+                h_idx = pos_batch[:, 0]
+                w_idx = pos_batch[:, 1]
+                batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
+                x = input_mapping(batch, B) if P["B_scale"] else batch
+                y = image[h_idx, w_idx]
 
-            _, out = net_ensemble.forward_grad(x)
-            loss = criterion(out, y.to(device))
-            loss.backward()
-            loss_batch_cum += loss.item()
+                _, out = net_ensemble.forward_grad(x)
+                loss = criterion(out, y.to(device))
+                loss.backward()
+                loss_batch_cum += loss.item()
 
-            if not P["acc_gradients"]:
+                if not P["acc_gradients"]:
+                    optimizer.step()
+                    optimizer.zero_grad()
+            # optimizer_boost_rate.step()
+            # optimizer_boost_rate.zero_grad()
+
+            if P["acc_gradients"]:
                 optimizer.step()
                 optimizer.zero_grad()
-        # optimizer_boost_rate.step()
-        # optimizer_boost_rate.zero_grad()
+            scheduler_plateau.step(loss)
+            lr_ensemble = optimizer.param_groups[0]['lr']
 
-        if P["acc_gradients"]:
-            optimizer.step()
-            optimizer.zero_grad()
-        scheduler_plateau.step(loss)
-        lr_ensemble = optimizer.param_groups[0]['lr']
-
-        loss_epoch = loss_batch_cum / len(batches)
-        metrics_manager.log_ensemble_epoch(epoch + 1, stage + 1, net_ensemble, loss_epoch, optimizer, pbar)
+            loss_epoch = loss_batch_cum / len(batches)
+            metrics_manager.log_ensemble_epoch(epoch + 1, stage + 1, net_ensemble, loss_epoch, optimizer, pbar)
 
     # LAST LOGGING PASS + PSNR + SSIM #
     with torch.no_grad():
@@ -252,7 +264,7 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
             h_idx = pos_batch[:, 0]
             w_idx = pos_batch[:, 1]
             batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
-            x = input_mapping(batch, B)
+            x = input_mapping(batch, B) if P["B_scale"] else batch
             y = image[h_idx, w_idx]
 
             _, out = net_ensemble.forward(x)
@@ -261,7 +273,7 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
             loss = criterion(out, y.to(device))
             loss_batch_cum += loss.item()
         loss_last_epoch = loss_batch_cum / len(batches)
-        metrics_manager.log_ensemble_stage(P, stage + 1, loss_last_epoch, image, pred_img_ensemble)
+        metrics_manager.log_ensemble_stage(P, stage + 1, loss_last_epoch, image, pred_img_ensemble, net_ensemble)
     return lr_ensemble
 
 
@@ -293,6 +305,12 @@ def train(net_ensemble, P, B, image, criterion, start_stage, batches):
         cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/error/_grad_{stage + 1}.png', (img_grad_weak.cpu().numpy() * 255))
         cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/pred_weak/_weak_{stage + 1}.png', (pred_img_weak.cpu().numpy() * 255))
         cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/pred/_ensemble_{stage + 1}.png', (pred_img_ensemble.cpu().numpy() * 255))
+
+        if MAX_MINUTES:
+            if time.time() - start > MAX_MINUTES * 60:
+                print("Time is up! Closing experiment...")
+                break
+
     save_ensemble_final(net_ensemble, batches, P, B)
     metrics_manager.log_ensemble_summary()
 
@@ -300,44 +318,89 @@ def train(net_ensemble, P, B, image, criterion, start_stage, batches):
 def main():
     P = hparams_grownet
 
+    if CFG_NAME:
+        try:
+            P = getattr(config.default, CFG_NAME)
+        except:
+            print("ERROR: Wrong configuration name argument")
+
     image = cv2.imread(INPUT_PATH)
     image = image_preprocess(image, P).to(device_image)
     cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample.png', image.cpu().numpy() * 255)
 
     init_P(P, image)
 
-    if P["model"] == 'siren':
-        c0 = torch.mean(image, dim=[0, 1]).to(device)
-    else:
-        c0 = torch.Tensor([0.0, 0.0, 0.0]).to(device)
-    net_ensemble = DynamicNet(c0, P["boost_rate"])
-    criterion = nn.MSELoss()
-
-    start_stage = 0
-    B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
-    if get_checkpoint and os.path.isfile(PATH_CHECKPOINT):
-        start_stage, _, B, P = load_checkpoint(PATH_CHECKPOINT, net_ensemble, None, is_grownet=True)
-        net_ensemble.to(device)
-        print("Checkpoint loaded")
-
-    batches = batch_generator(P, device_batches, shuffle=P["shuffle_batches"])
     with wandb.init(project="image_regression_final", **WANDB_CFG, dir=OUT_ROOT, config=P):
-        print(wandb.config)
+        # wandb.config.update({"input_layer_size": wandb.config["hidden_size"] * 2}, allow_val_change=True)
+        P.update(wandb.config)
+
+        if P["model"] == 'siren':
+            c0 = torch.mean(image, dim=[0, 1]).to(device)
+        else:
+            c0 = torch.Tensor([0.0, 0.0, 0.0]).to(device)
+        net_ensemble = DynamicNet(c0, P["boost_rate"])
+        criterion = nn.MSELoss()
+
+        start_stage = 0
+        if P["B_scale"]:
+            B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2)).to(device)
+        else:
+            B = None
+        if get_checkpoint and os.path.isfile(PATH_CHECKPOINT):
+            start_stage, _, B, P, lr = load_checkpoint(PATH_CHECKPOINT, net_ensemble, is_grownet=True)
+            net_ensemble.to(device)
+            print("Checkpoint loaded")
+
+        batches = batch_generator(P, device_batches, shuffle=P["shuffle_batches"])
+        print(P)
+        # print(wandb.config)
         # wandb.watch(net_ensemble, criterion, log="all")  # log="all", log_freq=10, log_graph=True
         train(net_ensemble, P, B, image, criterion, start_stage, batches)
 
-    pred_img = get_scaled_image(P, B, net_ensemble, scale=5.0)
-    cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample_resized.png', (pred_img.cpu().numpy() * 255))
+    # pred_img = get_scaled_image(P, B, net_ensemble, scale=5.0)
+    # cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample_resized.png', (pred_img.cpu().numpy() * 255))
 
 
 if __name__ == '__main__':
     start = time.time()
     get_checkpoint = False
     save_checkpoints = True
-    FOLDER = "grownet"
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--cfg-name", type=str, required=False, help="name of the configuration (see in default.py)"
+    )
+    parser.add_argument(  # loading checkpoint ignores config argument
+        "--run-name",
+        type=str,
+        default="",
+        help="Name of the run (for wandb), leave empty for random name.",
+    )
+    parser.add_argument(  # loading checkpoint ignores config argument
+        "--input-img",
+        type=str,
+        default="",
+        help="path for the input image",
+    )
+    parser.add_argument(  # loading checkpoint ignores config argument
+        "--max-mins",
+        type=int,
+        default=0,
+        help="maximum duration of the training",
+    )
+    configargs = parser.parse_args()
+
+    INPUT_PATH = configargs.input_img if configargs.input_img else None
+    MAX_MINUTES = configargs.max_mins if configargs.max_mins else None
+    CFG_NAME = configargs.cfg_name
+
+    FOLDER = os.path.join("grownet", configargs.run_name) if configargs.run_name else "grownet"
     PATH_CHECKPOINT = os.path.join(OUT_ROOT, FOLDER, "checkpoint.pth")
     PATH_ONNX = os.path.join(OUT_ROOT, FOLDER, "net_ensemble.onnx")
     PATH_B = os.path.join(OUT_ROOT, FOLDER, "B")
+
+    if not os.path.exists(os.path.join(OUT_ROOT, FOLDER)):
+        os.makedirs(os.path.join(OUT_ROOT, FOLDER))
     if not os.path.isdir(os.path.join(OUT_ROOT, FOLDER, "error")):
         os.mkdir(os.path.join(OUT_ROOT, FOLDER, "error"))
     if not os.path.isdir(os.path.join(OUT_ROOT, FOLDER, "pred")):
@@ -353,6 +416,15 @@ if __name__ == '__main__':
         "job_type": None,
         "id": None
     }
+    if configargs.run_name:
+        WANDB_CFG["name"] = configargs.run_name
+        WANDB_CFG["tags"].append("thesis")
+
+    # Seed experiment for repeatability
+    seed = 42
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
     main()
     print("seconds: ", time.time() - start)

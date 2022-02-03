@@ -30,32 +30,39 @@ def input_mapping(x, B):
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
 
-def save_checkpoint(path, model, optimizer, loss, epoch, B, P=None):
+def get_hole_mask(pos_batch, h_from, w_from, size):
+    mask_h = (h_from > pos_batch[:, 0]) | (h_from + size < pos_batch[:, 0])
+    mask_w = (w_from > pos_batch[:, 1]) | (w_from + size < pos_batch[:, 1])
+    return mask_h | mask_w
+
+
+def save_checkpoint(path, model, lr, loss, epoch, B, P=None):
     torch.save({
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': None if not optimizer else optimizer.state_dict(),
+        'lr': lr,
         'loss': loss,
         'B': B,
         'P': P
     }, path)
 
 
-def load_checkpoint(path, model, optimizer, is_grownet=False):
+def load_checkpoint(path, model, is_grownet=False):
     checkpoint = torch.load(path)
     loss = checkpoint['loss']
     epoch = checkpoint['epoch']
     B = checkpoint['B']
     P = checkpoint['P']
+    lr = checkpoint['lr']
 
     if is_grownet:
         model.load_state_dict(checkpoint['model_state_dict'], P)
     else:
         model.load_state_dict(checkpoint['model_state_dict'])
-    if optimizer:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    # if optimizer:
+    #     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-    return epoch, loss, B, P
+    return epoch, loss, B, P, lr
 
 
 def get_params_num(model):
@@ -92,6 +99,7 @@ def get_model(P, stage=0):
 def get_optimizer(model_params, lr, optim_name):
     return torch.optim.Adam(model_params, lr) if optim_name == 'adam' \
         else torch.optim.AdamW(model_params, lr) if optim_name == 'adamW' \
+        else torch.optim.RMSprop(model_params, lr) if optim_name == 'RMSprop' \
         else torch.optim.SGD(model_params, lr)
     # optimizer = torch.optim.Adagrad(model.parameters(), lr)
     # optimizer = adabound.AdaBound(model.parameters(), lr, final_lr=1)
@@ -136,7 +144,7 @@ def batch_generator(P, device, scale=1.0, shuffle=False):
     positions = np.stack(np.meshgrid(ys, xs), 0).T.reshape(-1, 2)
     positions = torch.from_numpy(positions).to(device)
 
-    if not "batch_sampling_mode" in P or P["batch_sampling_mode"] == BatchSamplingMode.whole.name:
+    if "batch_sampling_mode" not in P or P["batch_sampling_mode"] == BatchSamplingMode.whole.name:
         batches = [positions]
     elif P["batch_sampling_mode"] == BatchSamplingMode.nth_element.name:
         batches = [positions[i:: P["n_batches"]] for i in range(P["n_batches"])]
