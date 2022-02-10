@@ -1,9 +1,11 @@
+import argparse
 import os
 import pickle
 from datetime import timedelta
 import onnxmltools
 from onnxconverter_common import FloatTensorType
 from xgboost.core import EarlyStopException
+import config.default
 from config.default import OUT_ROOT, init_P, INPUT_PATH, hparams_xgboost
 from torchmetrics.functional import ssim
 from utils import batch_generator, input_mapping, image_preprocess, get_psnr
@@ -49,9 +51,58 @@ if __name__ == '__main__':
     start = time.time()
     l = {'time': 0}
 
-    FOLDER = "xgboost"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cfg-name", type=str, required=False,
+                        help="name of the configuration (see in default.py)")
+    parser.add_argument("--run_name", type=str, default="",
+                        help="Name of the run (for wandb), leave empty for random name.")
+    parser.add_argument("--input_img", type=str, default="",
+                        help="path for the input image")
+    parser.add_argument("--max_mins", type=int,
+                        help="maximum duration of the training")
+
+    # Config overrides #
+    parser.add_argument("--B_scale", type=int,
+                        help="Random Fourier features scaler, set to 0 to disable fourier features")
+    parser.add_argument("--eval_metric", type=str,
+                        help="rmse, mae, ...")
+    parser.add_argument("--posEnc_size", type=int,
+                        help="width of positional encoding input layer")
+    parser.add_argument("--lambda", type=float,
+                        help="lambda")
+    parser.add_argument("--learning_rate", type=float,
+                        help="learning rate")
+    parser.add_argument("--max_depth", type=int,
+                        help="maximum depth of an individual tree")
+    parser.add_argument("--num_boost_round", type=int,
+                        help="like training epochs?")
+    parser.add_argument("--reg_lambda", type=float,
+                        help="some regularizer")
+    parser.add_argument("--scale", type=float,
+                        help="online image resizing factor")
+    parser.add_argument("--desired_psnr", type=float,
+                        help="target quality for the individual color channel")
+
+    configargs = parser.parse_args()
+
+    P = hparams_xgboost
+    if configargs.cfg_name:
+        try:
+            P = getattr(config.default, configargs.cfg_name)
+        except:
+            print("ERROR: Wrong configuration name argument")
+    tmp_args = {k: v for k, v in configargs.__dict__.items() if k not in ["cfg_name", "run_name", "input_img", "max_mins"]}
+    for k, v in tmp_args.items():
+        if v is not None:
+            P[k] = v
+
+    FOLDER = os.path.join("xgboost", configargs.run_name) if configargs.run_name else os.path.join("xgboost", "unnamed")
     PATH_MODEL = os.path.join(OUT_ROOT, FOLDER, "xgboost_RGBmodels.pkl")
     PATH_ONNX = os.path.join(OUT_ROOT, FOLDER, "xgboost.onnx")
+
+    if not os.path.exists(os.path.join(OUT_ROOT, FOLDER)):
+        os.makedirs(os.path.join(OUT_ROOT, FOLDER))
+
     WANDB_CFG = {
         "entity": "a-di",
         "mode": "online",  # ["online", "offline", "disabled"]
@@ -60,8 +111,9 @@ if __name__ == '__main__':
         "job_type": None,
         "id": None
     }
-
-    P = hparams_xgboost
+    if configargs.run_name:
+        WANDB_CFG["name"] = configargs.run_name
+        WANDB_CFG["tags"].append("thesis")
 
     image = cv2.imread(INPUT_PATH)
     image = image_preprocess(image, P)
@@ -69,9 +121,14 @@ if __name__ == '__main__':
     P["image_shape"] = image.shape
     h, w, channels = P["image_shape"]
 
-    batches = batch_generator(P, 'cpu', shuffle=False)
-    B = P["B_scale"] * torch.randn((P["input_layer_size"] // 2, 2))
-    xtrain = input_mapping(batches[0], B)
+    batch = batch_generator(P, 'cpu', shuffle=False)[0]
+    batch = torch.stack((batch[:, 0] / h, batch[:, 1] / w), dim=1)  # normalize coordinates to [0,1]
+    if P["B_scale"]:
+        B = P["B_scale"] * torch.randn((P["posEnc_size"] // 2, 2))
+    else:
+        B = None
+    xtrain = input_mapping(batch, B)
+    xtrain = input_mapping(batch, B) if P["B_scale"] else xtrain
     xgtrains = {
         "R": xgb.DMatrix(xtrain, label=image.view(-1, channels)[:, 0]),
         "G": xgb.DMatrix(xtrain, label=image.view(-1, channels)[:, 1]),
@@ -97,7 +154,7 @@ if __name__ == '__main__':
         np.save(OUT_ROOT + "/B", B)
         onnx_s = 0
         for c in models:
-            initial_type = [('mapped2D', FloatTensorType([None, P["input_layer_size"]]))]
+            initial_type = [('mapped2D', FloatTensorType([None, P["posEnc_size"]]))]
             onx = onnxmltools.convert.convert_xgboost(models[c], initial_types=initial_type)
             f_path = f"{PATH_ONNX.removesuffix('.onnx')}{c}.onnx"
             with open(f_path, "wb") as f:

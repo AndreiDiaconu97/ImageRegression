@@ -3,12 +3,12 @@ import torch
 from torch import nn
 
 
-class NN(nn.Module):  # [x,y]->[RGB]
-    def __init__(self, dim_in, hidden_size, num_layers):
-        super(NN, self).__init__()
+class ReLU_model(nn.Module):  # [x,y]->[RGB]
+    def __init__(self, dim_in, hidden_size, hidden_layers):
+        super(ReLU_model, self).__init__()
 
         layers = [nn.Linear(dim_in, hidden_size), nn.ReLU()]
-        for i in range(0, num_layers - 1):
+        for i in range(0, hidden_layers):
             layers.append(nn.Linear(hidden_size, hidden_size))
             layers.append(nn.ReLU())
         layers.append(nn.Linear(hidden_size, 3))
@@ -21,7 +21,16 @@ class NN(nn.Module):  # [x,y]->[RGB]
 
 
 class SirenLayer(nn.Module):
-    def __init__(self, in_f, out_f, w0=30, is_first=False, is_last=False):
+    # See paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of omega_0.
+
+    # If is_first=True, omega_0 is a frequency factor which simply multiplies the activations before the
+    # nonlinearity. Different signals may require different omega_0 in the first layer - this is a
+    # hyperparameter.
+
+    # If is_first=False, then the weights will be divided by omega_0 so as to keep the magnitude of
+    # activations constant, but boost gradients to the weight matrix (see supplement Sec. 1.5)
+
+    def __init__(self, in_f, out_f, w0, is_first=False, is_last=False):  # w0=30
         super().__init__()
         self.in_f = in_f
         self.w0 = w0
@@ -41,21 +50,21 @@ class SirenLayer(nn.Module):
         return x if self.is_last else torch.sin(self.w0 * x)
 
 
-def gon_model(input_dim, hidden_dim, num_layers):
-    layers = [SirenLayer(input_dim, hidden_dim, is_first=True)]
-    for i in range(0, num_layers - 1):
-        layers.append(SirenLayer(hidden_dim, hidden_dim))
-    layers.append(SirenLayer(hidden_dim, 3, is_last=True))
+def gon_model(input_dim, hidden_dim, hidden_layers, w0):
+    layers = [SirenLayer(input_dim, hidden_dim, w0, is_first=True)]
+    for i in range(0, hidden_layers):
+        layers.append(SirenLayer(hidden_dim, hidden_dim, w0))
+    layers.append(SirenLayer(hidden_dim, 3, w0, is_last=True))
 
     return nn.Sequential(*layers)
 
 
-class NN_grownet(nn.Module):  # [x,y]->[RGB]
-    def __init__(self, dim_in, hidden_size, num_layers):
-        super(NN_grownet, self).__init__()
+class ReLU_grownet(nn.Module):  # [x,y]->[RGB]
+    def __init__(self, dim_in, hidden_size, hidden_layers):
+        super(ReLU_grownet, self).__init__()
 
         layers = [nn.Linear(dim_in, hidden_size), nn.ReLU()]
-        for i in range(0, num_layers - 1):
+        for i in range(0, hidden_layers):
             layers.append(nn.Linear(hidden_size, hidden_size))
             layers.append(nn.ReLU())
 
@@ -77,19 +86,19 @@ class NN_grownet(nn.Module):  # [x,y]->[RGB]
             dim_in = input_size
         else:
             dim_in = input_size + penultimate_size
-        model = NN_grownet(dim_in, penultimate_size, num_layers)
+        model = ReLU_grownet(dim_in, penultimate_size, num_layers)
         return model
 
 
 class SIREN_grownet(nn.Module):
-    def __init__(self, dim_in, hidden_size, num_layers):
+    def __init__(self, dim_in, hidden_size, hidden_layers, w0):
         super(SIREN_grownet, self).__init__()
-        layers = [SirenLayer(dim_in, hidden_size, is_first=True)]
-        for i in range(0, num_layers - 1):
-            layers.append(SirenLayer(hidden_size, hidden_size))
+        layers = [SirenLayer(dim_in, hidden_size, w0, is_first=True)]
+        for i in range(0, hidden_layers):
+            layers.append(SirenLayer(hidden_size, hidden_size, w0))
 
         self.model_part1 = nn.Sequential(*layers)
-        self.model_part2 = SirenLayer(hidden_size, 3, is_last=True)
+        self.model_part2 = SirenLayer(hidden_size, 3, w0, is_last=True)
 
     def forward(self, x, prev_penultimate=None):
         if prev_penultimate is not None:
@@ -99,10 +108,10 @@ class SIREN_grownet(nn.Module):
         return penultimate, out
 
     @classmethod
-    def get_model(cls, stage, input_size, penultimate_size, num_layers):
+    def get_model(cls, stage, input_size, penultimate_size, num_layers, w0):
         if stage == 0:
             dim_in = input_size
         else:
             dim_in = input_size + penultimate_size
-        model = SIREN_grownet(dim_in, penultimate_size, num_layers)
+        model = SIREN_grownet(dim_in, penultimate_size, num_layers, w0)
         return model

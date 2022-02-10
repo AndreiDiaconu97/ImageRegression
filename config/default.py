@@ -10,7 +10,7 @@ from utils import BatchSamplingMode
 # torch.cuda.manual_seed_all(hash("so runs are repeatable") % 2**32 - 1)
 
 OUT_ROOT = "out"
-INPUT_PATH = "data/mountains.jpg"
+INPUT_PATH = "data/mountains_final.jpg"
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device_batches = device
@@ -42,54 +42,34 @@ def init_P(P, image):
         P["n_batches"] += 1
 
 
-hparams_grownet = {
-    'type': 'grownet',
-    'B_scale': 30,  # set False for no posEnc # NOTE: consider w0=30 in Siren, with 4 hidden set w0=250 if not using positional encoding
-    'normalized_coordinates': True,
-    'acc_gradients': False,
-    'batch_sampling_mode': BatchSamplingMode.nth_element.name,
-    'shuffle_batches': True,
-    'batch_size': 20000,
-    'boost_rate': 1.0,
-    'epochs_per_correction': 100,
-    'epochs_per_stage': 200,
-    'hidden_size': 512,
-    'hidden_layers': 1,
-    'lr_ensemble': 1e-4,
-    'lr_model': 1e-4,
-    'model': 'siren',
-    'num_nets': 17,
-    'optimizer': 'adamW',
-    'scale': 0.2,
-}
+#### EXPERIMENTS CONFIGS ################################################################
 
 hparams_base = {
     'type': 'base',
     'B_scale': 30,  # set False for no posEnc # NOTE: consider w0=30 in Siren, with 4 hidden set w0=250 if not using positional encoding
-    'normalized_coordinates': True,
+    'w0': 30,  # only used if model=siren
     'acc_gradients': False,
     'batch_sampling_mode': BatchSamplingMode.nth_element.name,
     'shuffle_batches': True,
-    'batch_size': 20000,
-    'epochs': 1000,
-    'hidden_size': 512,
-    'hidden_layers': 3,
+    'batch_size': 5000,
+    'epochs': 10000,
+    'hidden_size': 256,
+    'hidden_layers': 5,
     'lr': 1e-4,  # [0.01, 0.0001],
-    'model': 'siren',
-    'optimizer': 'adamW',  # RMSprop, adam, adamW, SGD
-    'scale': 0.2,
+    'lr_patience': 1000,
+    'model': 'siren',  # relu
+    'optimizer': 'adam',  # RMSprop, adam, adamW, SGD
+    'scale': 1.0,
 }
 
-#### EXPERIMENTS CONFIGS ################################################################
-
-hparams_grownet_baseline = {
+hparams_grownet = {
     'type': 'grownet',
-    'B_scale': 30,  # FIXME: consider w0 in Siren too
-    'normalized_coordinates': True,
+    'B_scale': 30,  # set False for no posEnc # NOTE: consider w0=30 in Siren, with 4 hidden set w0=250 if not using positional encoding
+    'w0': 30,  # only used if model=siren
     'acc_gradients': False,
     'batch_sampling_mode': BatchSamplingMode.nth_element.name,
     'shuffle_batches': True,
-    'batch_size': 20000,
+    'batch_size': 5000,
     'boost_rate': 1.0,
     'epochs_per_correction': 20,
     'epochs_per_stage': 20,
@@ -97,34 +77,19 @@ hparams_grownet_baseline = {
     'hidden_layers': 1,
     'lr_ensemble': 1e-4,
     'lr_model': 1e-4,
+    'lr_patience_model': 2,
+    'lr_patience_ensemble': 2,
     'model': 'siren',
     'num_nets': 17,
-    'optimizer': 'adamW',
+    'optimizer': 'adam',
     'scale': 0.2,
 }
 
-hparams_base_baseline = {
-    'type': 'base',
-    'B_scale': 30,
-    'normalized_coordinates': True,
-    'acc_gradients': False,
-    'batch_sampling_mode': BatchSamplingMode.nth_element.name,
-    'shuffle_batches': True,
-    'batch_size': 5000,
-    'epochs': 1000,
-    'hidden_size': 512,
-    'hidden_layers': 4,
-    'lr': 1e-4,  # [0.01, 0.0001],
-    'model': 'siren',
-    'optimizer': 'adamW',  # RMSprop, adam, adamW, SGD
-    'scale': 0.2,
-}
-
-hparams_xgboost_baseline = {
+hparams_xgboost = {
     'type': 'xgboost',
-    'B_scale': 0.03,
+    'B_scale': 30,
     'eval_metric': ['rmse'],  # 'mae'
-    'input_layer_size': 16 * 2,
+    'posEnc_size': 16 * 2,
     'lambda': 1,
     'learning_rate': 1.0,
     'max_depth': 7,

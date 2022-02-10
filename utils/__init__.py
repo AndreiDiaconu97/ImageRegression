@@ -3,7 +3,9 @@ import random
 import cv2
 import torch
 import numpy as np
-from utils.models import SIREN_grownet, NN_grownet, NN, gon_model
+from torchvision.transforms import Compose, ToTensor, Normalize
+
+from utils.models import SIREN_grownet, ReLU_grownet, ReLU_model, gon_model
 
 
 class BatchSamplingMode(enum.Enum):
@@ -19,6 +21,11 @@ def image_preprocess(image, P):
     w *= P["scale"]
     image = cv2.resize(image, (int(w), int(h)), interpolation=cv2.INTER_LINEAR)
     image = torch.Tensor(image).div(255)  # values:[0,1]
+    # transform = Compose([
+    #     ToTensor(),
+    #     Normalize(torch.Tensor([0.5]), torch.Tensor([0.5]))
+    # ])
+    # image = transform(image)
     return image
 
 
@@ -76,18 +83,18 @@ def get_psnr(pred, target):
 def get_model(P, stage=0):
     if P["type"] == "base":
         if P["model"] == 'siren':
-            model = gon_model(P["input_layer_size"], P["hidden_size"], P["hidden_layers"])
-        elif P["model"] == 'nn':
-            model = NN(P["input_layer_size"], P["hidden_size"], P["hidden_layers"])
+            model = gon_model(P["input_layer_size"], P["hidden_size"], P["hidden_layers"], P["w0"])
+        elif P["model"] == 'relu':
+            model = ReLU_model(P["input_layer_size"], P["hidden_size"], P["hidden_layers"])
         else:
             raise ValueError(f'weak model type: unknown value {P["model"]}')
         return model
 
     elif P["type"] == "grownet":
         if P["model"] == 'siren':
-            model = SIREN_grownet.get_model(stage, P["input_layer_size"], P["hidden_size"], P["hidden_layers"])
-        elif P["model"] == 'nn':
-            model = NN_grownet.get_model(stage, P["input_layer_size"], P["hidden_size"], P["hidden_layers"])
+            model = SIREN_grownet.get_model(stage, P["input_layer_size"], P["hidden_size"], P["hidden_layers"], P["w0"])
+        elif P["model"] == 'relu':
+            model = ReLU_grownet.get_model(stage, P["input_layer_size"], P["hidden_size"], P["hidden_layers"])
         else:
             raise ValueError(f'weak model type: unknown value {P["model"]}')
         return model

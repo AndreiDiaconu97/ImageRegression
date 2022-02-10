@@ -2,6 +2,8 @@ import argparse
 import random
 import sys
 
+from torch.optim.lr_scheduler import MultiStepLR
+
 sys.path.append('C:/Users/USER/Documents/Programming/ImageRegression')
 
 from adabound import adabound
@@ -27,7 +29,8 @@ def validate_model(P, batches, image, pred_img, B, model, criterion):
     for pos_batch in batches:  # save prediction
         h_idx = pos_batch[:, 0]
         w_idx = pos_batch[:, 1]
-        batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
+        # batch = torch.stack((h_idx / h * 2 - 1, w_idx / w * 2 - 1), dim=1).to(device)  # [-1,1] better for Siren
+        batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)  # [0,1] better for Fourier
         x = input_mapping(batch, B) if P["B_scale"] else batch
         y = image[h_idx, w_idx]
 
@@ -63,10 +66,11 @@ class MetricsManager:
             "loss": self.loss,
         }, commit=True)
 
-    def log_metrics(self, P, epoch, model, optimizer, image, pred_image, pbar=None):
+    def log_metrics(self, P, model, optimizer, image, pred_image, epoch=None, pbar=None):
         h, w, channels = P["image_shape"]
         self.n_params = get_params_num(model)
-        self.epoch = epoch
+        if epoch:
+            self.epoch = epoch
         self.lr = optimizer.param_groups[0]['lr']
         self.psnr = get_psnr(pred_image, image).item()
         self.ssim = ssim(pred_image.view(1, channels, h, w), image.view(1, channels, h, w)).item()
@@ -106,6 +110,7 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
     model.train()
     h, w, channels = P["image_shape"]
     metrics_manager = MetricsManager()
+    # scheduler_step = MultiStepLR(optimizer, milestones=[1000], gamma=0.1)
 
     pred_img = torch.Tensor(np.empty(shape=(h, w, channels))).to(device_pred_img)
 
@@ -124,7 +129,8 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
 
             h_idx = pos_batch[:, 0]
             w_idx = pos_batch[:, 1]
-            batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)
+            # batch = torch.stack((h_idx / h * 2 - 1, w_idx / w * 2 - 1), dim=1).to(device)  # [-1,1] better for Siren
+            batch = torch.stack((h_idx / h, w_idx / w), dim=1).to(device)  # [0,1] better for Fourier
             x = input_mapping(batch, B) if P["B_scale"] else batch
             y = image[h_idx, w_idx]
 
@@ -136,19 +142,21 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
             if not P["acc_gradients"]:
                 optimizer.step()
                 optimizer.zero_grad()
+            # scheduler_step.step()
+            if scheduler:
+                scheduler.step(loss)
         if P["acc_gradients"]:
             optimizer.step()
             optimizer.zero_grad()
-        if scheduler:
-            scheduler.step(loss)
-        # optimizer.param_groups[0]['lr'] *= 0.80
+
+        # optimizer.param_groups[0]['lr'] *= 0.90
         loss_epoch = loss_batch_cum / len(batches)
         metrics_manager.log_loss(epoch + 1, loss_epoch)
 
         with torch.no_grad():
             if (epoch + 1) % 1 == 0 and (time.time() - last_t > 1):
                 loss_epoch = validate_model(P, batches, image, pred_img, B, model, criterion)
-                metrics_manager.log_metrics(P, epoch + 1, model, optimizer, image, pred_img, pbar)
+                metrics_manager.log_metrics(P, model, optimizer, image, pred_img, epoch + 1, pbar)
                 save_image_out(image, pred_img, epoch + 1)
                 last_t = time.time()
 
@@ -165,11 +173,12 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
                     break
 
     loss_epoch = validate_model(P, batches, image, pred_img, B, model, criterion)
-    metrics_manager.log_metrics(P, P["epochs"], model, optimizer, image, pred_img)
+    metrics_manager.log_metrics(P, model, optimizer, image, pred_img)
 
     save_image_out(image, pred_img, P["epochs"])
-    torch.onnx.export(model, input_mapping(batches[0].to(device), B), PATH_ONNX, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
-    np.save(PATH_B, B.cpu().numpy())
+    torch.onnx.export(model, input_mapping(batches[0].to(device), B).float(), PATH_ONNX, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
+    if B is not None:
+        np.save(PATH_B, B.cpu().numpy())
     metrics_manager.log_final_metrics()
     # wandb.save(PATH_ONNX)
     # wandb.save(PATH_B + ".npy")
@@ -185,15 +194,7 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
     ]) + '.png', (pred_img.cpu().numpy() * 255))
 
 
-def main():
-    P = hparams_base
-
-    if CFG_NAME:
-        try:
-            P = getattr(config.default, CFG_NAME)
-        except:
-            print("ERROR: Wrong configuration name argument")
-
+def main(P):
     image = cv2.imread(INPUT_PATH)
     image = image_preprocess(image, P).to(device_image)
     cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample.png', image.cpu().numpy() * 255)
@@ -207,7 +208,7 @@ def main():
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.01, steps_per_epoch=1, epochs=200, anneal_strategy='linear')
     # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda e: 0.95 ** e)
     # scheduler2 = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=0.00001)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=.1, verbose=False)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=P["lr_patience"], factor=.5, verbose=True, cooldown=1000)
 
     start_epoch = 0
     loss = None
@@ -237,34 +238,63 @@ if __name__ == '__main__':
     save_checkpoints = True
 
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--cfg-name", type=str, required=False, help="name of the configuration (see in default.py)"
-    )
-    parser.add_argument(  # loading checkpoint ignores config argument
-        "--run-name",
-        type=str,
-        default="",
-        help="Name of the run (for wandb), leave empty for random name.",
-    )
-    parser.add_argument(  # loading checkpoint ignores config argument
-        "--input-img",
-        type=str,
-        default="",
-        help="path for the input image",
-    )
-    parser.add_argument(  # loading checkpoint ignores config argument
-        "--max-mins",
-        type=int,
-        default=0,
-        help="maximum duration of the training",
-    )
+    parser.add_argument("--cfg-name", type=str, required=False,
+                        help="name of the configuration (see in default.py)")
+    parser.add_argument("--run_name", type=str, default="",
+                        help="Name of the run (for wandb), leave empty for random name.")
+    parser.add_argument("--input_img", type=str, default="",
+                        help="path for the input image")
+    parser.add_argument("--max_mins", type=int,
+                        help="maximum duration of the training")
+
+    # Config overrides #
+    parser.add_argument("--B_scale", type=int,
+                        help="Random Fourier features scaler, set to 0 to disable fourier features")
+    parser.add_argument("--w0", type=int,
+                        help="Siren scaler factor, ignored if using ReLU")
+    parser.add_argument("--normalized_coordinates", type=bool,
+                        help="map pixel coordinates to [0,1], leave True.")
+    parser.add_argument("--acc_gradients", type=bool,
+                        help="accumulate gradient for all batches before gradient descent")
+    parser.add_argument("--batch_sampling_mode", type=str,
+                        help="options: [sequence, nth_element, whole]")
+    parser.add_argument("--shuffle_batches", type=bool,
+                        help="better leaving True")
+    parser.add_argument("--batch_size", type=int,
+                        help="best around 5000-20000")
+    parser.add_argument("--epochs", type=int,
+                        help="number of training epochs")
+    parser.add_argument("--hidden_size", type=int,
+                        help="weak model width")
+    parser.add_argument("--hidden_layers", type=int,
+                        help="weak model depth")
+    parser.add_argument("--lr", type=float,
+                        help="training learning rate")
+    parser.add_argument("--model", type=str,
+                        help="options: [relu, siren]")
+    parser.add_argument("--optimizer", type=str,
+                        help="options: [adam, adamW, RMSprop, SGD]")
+    parser.add_argument("--scale", type=float,
+                        help="online image resizing factor")
+
     configargs = parser.parse_args()
 
-    INPUT_PATH = configargs.input_img if configargs.input_img else None
-    MAX_MINUTES = configargs.max_mins if configargs.max_mins else None
-    CFG_NAME = configargs.cfg_name
+    P = hparams_base
+    if configargs.cfg_name:
+        try:
+            P = getattr(config.default, configargs.cfg_name)
+        except:
+            print("ERROR: Wrong configuration name argument")
+    tmp_args = {k: v for k, v in configargs.__dict__.items() if k not in ["cfg_name", "run_name", "input_img", "max_mins"]}
+    for k, v in tmp_args.items():
+        if v is not None:
+            P[k] = v
 
-    FOLDER = os.path.join("base", configargs.run_name) if configargs.run_name else "base"
+    if configargs.input_img:
+        INPUT_PATH = configargs.input_img
+    MAX_MINUTES = configargs.max_mins if configargs.max_mins else None
+
+    FOLDER = os.path.join("base", configargs.run_name) if configargs.run_name else os.path.join("base", "unnamed")
     PATH_CHECKPOINT = os.path.join(OUT_ROOT, FOLDER, "checkpoint.pth")
     PATH_ONNX = os.path.join(OUT_ROOT, FOLDER, "_model_base.onnx")
     PATH_B = os.path.join(OUT_ROOT, FOLDER, "B")
@@ -290,5 +320,5 @@ if __name__ == '__main__':
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    main()
+    main(P)
     print("seconds: ", time.time() - start)

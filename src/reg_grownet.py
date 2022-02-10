@@ -32,7 +32,7 @@ def save_ensemble_final(net_ensemble, batches, P, B):
         middle_feat, out = net_ensemble.forward(x)
         input_shape = x if i == 0 else (x, middle_feat)
         torch.onnx.export(model, input_shape, f_path, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
-    if B:
+    if B is not None:
         np.save(PATH_B, B.cpu().numpy())
 
 
@@ -152,7 +152,7 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
     h, w, channels = P["image_shape"]
     model = get_model(P, stage).to(device)
     optimizer = get_optimizer(model.parameters(), P["lr_model"], P["optimizer"])
-    scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=.1, verbose=False)
+    scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=P["lr_patience_model"], factor=.1, verbose=False, cooldown=3)
 
     pbar = tqdm(range(P["epochs_per_stage"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: weak model training", unit=" epoch")
     for epoch in pbar:
@@ -219,7 +219,7 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
         # {'params': [net_ensemble.boost_rate], 'lr': 2}
     ], lr_ensemble / lr_scaler, P["optimizer"])
     # optimizer_boost_rate = get_optimizer([net_ensemble.boost_rate], 1e-2, P["optimizer"])
-    scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=2, factor=.25, verbose=False)
+    scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=P["lr_patience_ensemble"], factor=.1, verbose=False, cooldown=3)
 
     # if stage % 1 == 0:
     #     # lr_scaler *= 2
@@ -315,15 +315,7 @@ def train(net_ensemble, P, B, image, criterion, start_stage, batches):
     metrics_manager.log_ensemble_summary()
 
 
-def main():
-    P = hparams_grownet
-
-    if CFG_NAME:
-        try:
-            P = getattr(config.default, CFG_NAME)
-        except:
-            print("ERROR: Wrong configuration name argument")
-
+def main(P):
     image = cv2.imread(INPUT_PATH)
     image = image_preprocess(image, P).to(device_image)
     cv2.imwrite(f'{OUT_ROOT}/{FOLDER}/sample.png', image.cpu().numpy() * 255)
@@ -367,34 +359,69 @@ if __name__ == '__main__':
     save_checkpoints = True
 
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--cfg-name", type=str, required=False, help="name of the configuration (see in default.py)"
-    )
-    parser.add_argument(  # loading checkpoint ignores config argument
-        "--run-name",
-        type=str,
-        default="",
-        help="Name of the run (for wandb), leave empty for random name.",
-    )
-    parser.add_argument(  # loading checkpoint ignores config argument
-        "--input-img",
-        type=str,
-        default="",
-        help="path for the input image",
-    )
-    parser.add_argument(  # loading checkpoint ignores config argument
-        "--max-mins",
-        type=int,
-        default=0,
-        help="maximum duration of the training",
-    )
+    parser.add_argument("--cfg-name", type=str, required=False,
+                        help="name of the configuration (see in default.py)")
+    parser.add_argument("--run_name", type=str, default="",
+                        help="Name of the run (for wandb), leave empty for random name.")
+    parser.add_argument("--input_img", type=str, default="",
+                        help="path for the input image")
+    parser.add_argument("--max_mins", type=int,
+                        help="maximum duration of the training")
+
+    # Config overrides #
+    parser.add_argument("--B_scale", type=int,
+                        help="Random Fourier features scaler, set to 0 to disable fourier features")
+    parser.add_argument("--w0", type=int,
+                        help="Siren scaler factor, ignored if using ReLU")
+    parser.add_argument("--acc_gradients", type=bool,
+                        help="accumulate gradient for all batches before gradient descent")
+    parser.add_argument("--batch_sampling_mode", type=str,
+                        help="options: [sequence, nth_element, whole]")
+    parser.add_argument("--shuffle_batches", type=bool,
+                        help="better leaving True")
+    parser.add_argument("--batch_size", type=int,
+                        help="best around 5000-20000")
+    parser.add_argument("--boost_rate", type=float,
+                        help="GrowNet boosting rate")
+    parser.add_argument("--epochs_per_correction", type=int,
+                        help="epochs of fully corrective steps for each weak learner")
+    parser.add_argument("--epochs_per_stage", type=int,
+                        help="epoch of training for each weak learner")
+    parser.add_argument("--hidden_size", type=int,
+                        help="weak model width")
+    parser.add_argument("--hidden_layers", type=int,
+                        help="weak model depth")
+    parser.add_argument("--lr_ensemble", type=float,
+                        help="learning rate during fully-corrective phase")
+    parser.add_argument("--lr_model", type=float,
+                        help="learning rate during weak model training")
+    parser.add_argument("--model", type=str,
+                        help="options: [relu, siren]")
+    parser.add_argument("--num_nets", type=int,
+                        help="final number of weak learners")
+    parser.add_argument("--optimizer", type=str,
+                        help="options: [adam, adamW, RMSprop, SGD]")
+    parser.add_argument("--scale", type=float,
+                        help="online image resizing factor")
+
     configargs = parser.parse_args()
 
-    INPUT_PATH = configargs.input_img if configargs.input_img else None
-    MAX_MINUTES = configargs.max_mins if configargs.max_mins else None
-    CFG_NAME = configargs.cfg_name
+    P = hparams_grownet
+    if configargs.cfg_name:
+        try:
+            P = getattr(config.default, configargs.cfg_name)
+        except:
+            print("ERROR: Wrong configuration name argument")
+    tmp_args = {k: v for k, v in configargs.__dict__.items() if k not in ["cfg_name", "run_name", "input_img", "max_mins"]}
+    for k, v in tmp_args.items():
+        if v is not None:
+            P[k] = v
 
-    FOLDER = os.path.join("grownet", configargs.run_name) if configargs.run_name else "grownet"
+    if configargs.input_img:
+        INPUT_PATH = configargs.input_img
+    MAX_MINUTES = configargs.max_mins if configargs.max_mins else None
+
+    FOLDER = os.path.join("grownet", configargs.run_name) if configargs.run_name else os.path.join("grownet", "unnamed")
     PATH_CHECKPOINT = os.path.join(OUT_ROOT, FOLDER, "checkpoint.pth")
     PATH_ONNX = os.path.join(OUT_ROOT, FOLDER, "net_ensemble.onnx")
     PATH_B = os.path.join(OUT_ROOT, FOLDER, "B")
@@ -426,5 +453,5 @@ if __name__ == '__main__':
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    main()
+    main(P)
     print("seconds: ", time.time() - start)
