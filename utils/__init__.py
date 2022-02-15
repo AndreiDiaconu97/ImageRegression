@@ -163,6 +163,16 @@ def batch_generator(P, device, scale=1.0, shuffle=False):
         random.shuffle(batches)
     return batches
 
+
+def str_to_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value.lower() in {'false', 'f', '0', 'no', 'n'}:
+        return False
+    elif value.lower() in {'true', 't', '1', 'yes', 'y'}:
+        return True
+    raise ValueError(f'{value} is not a valid boolean value')
+
 # def batch_generator_yield(P, shuffle=False):  # WARNING: don't use this
 #     h, w, channels = P["input_size"]
 #

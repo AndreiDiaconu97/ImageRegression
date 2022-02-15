@@ -14,12 +14,14 @@ class ForwardType(Enum):
 
 
 class DynamicNet:
-    def __init__(self, c0, lr):
+    def __init__(self, c0, lr, propagate_context=True, enable_boost_rate=True):
         super(DynamicNet, self).__init__()
         self.models = []
         self.c0 = c0
         self.lr = lr
         self.boost_rate = nn.Parameter(torch.tensor(lr, requires_grad=True, device="cuda"))
+        self.propagate_context = propagate_context
+        self.enable_boost_rate = enable_boost_rate
 
     def __repr__(self):
         return str(self.models)
@@ -44,7 +46,8 @@ class DynamicNet:
         for m in self.models:
             params.extend(m.parameters())
 
-        # params.append(self.boost_rate)
+        if self.enable_boost_rate:
+            params.append(self.boost_rate)
         return params
 
     def named_parameters(self, recurse=True):
@@ -84,9 +87,9 @@ class DynamicNet:
         with torch.no_grad():
             for m in self.models:
                 if middle_feat_cum is None:
-                    middle_feat_cum, prediction = m(x, middle_feat_cum)
+                    middle_feat_cum, prediction = m(x, middle_feat_cum) if self.propagate_context else m(x, None)
                 else:
-                    middle_feat_cum, pred = m(x, middle_feat_cum)
+                    middle_feat_cum, pred = m(x, middle_feat_cum) if self.propagate_context else m(x, None)
                     prediction += pred
         return middle_feat_cum, self.c0 + self.boost_rate * prediction  # TODO: check if these parameters are necessary
 
@@ -97,7 +100,7 @@ class DynamicNet:
         middle_feat_cum = None
         preds = []
         for m in self.models:
-            middle_feat_cum, pred = m(x, middle_feat_cum)
+            middle_feat_cum, pred = m(x, middle_feat_cum) if self.propagate_context else m(x, None)
             preds.append(pred)
         prediction = sum(preds)
         return middle_feat_cum, self.c0 + self.boost_rate * prediction

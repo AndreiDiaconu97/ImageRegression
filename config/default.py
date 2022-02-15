@@ -52,7 +52,7 @@ hparams_base = {
     'batch_sampling_mode': BatchSamplingMode.nth_element.name,
     'shuffle_batches': True,
     'batch_size': 5000,
-    'epochs': 10000,
+    'epochs': 100000,
     'hidden_size': 256,
     'hidden_layers': 5,
     'lr': 1e-4,  # [0.01, 0.0001],
@@ -71,18 +71,22 @@ hparams_grownet = {
     'shuffle_batches': True,
     'batch_size': 5000,
     'boost_rate': 1.0,
-    'epochs_per_correction': 20,
+    'epochs_per_correction': 10,
     'epochs_per_stage': 20,
     'hidden_size': 256,
     'hidden_layers': 1,
     'lr_ensemble': 1e-4,
     'lr_model': 1e-4,
-    'lr_patience_model': 2,
-    'lr_patience_ensemble': 2,
+    'lr_patience_model': 200,
+    'lr_cooldown_weak': 30,
+    'lr_patience_ensemble': 1000,
+    'lr_cooldown_ensemble': 100,
+    'propagate_context': True,  # if False, keep B_scale ON
+    'enable_boost_rate': False,
     'model': 'siren',
-    'num_nets': 17,
+    'num_nets': 500,
     'optimizer': 'adam',
-    'scale': 0.2,
+    'scale': 1.0,
 }
 
 hparams_xgboost = {
@@ -92,14 +96,14 @@ hparams_xgboost = {
     'posEnc_size': 16 * 2,
     'lambda': 1,
     'learning_rate': 1.0,
-    'max_depth': 7,
+    'max_depth': 8,
     # 'n_estimators': 10000,
     'num_boost_round': 10000,
     # 'num_parallel_tree': 4, # for CPU?
     'tree_method': 'gpu_hist',
     'objective': 'reg:squarederror',
     'reg_lambda': 0.01,
-    'scale': 0.2,
+    'scale': 1.0,
     'subsample': 1,
     'desired_psnr': 40
 }

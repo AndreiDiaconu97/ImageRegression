@@ -4,7 +4,7 @@ import sys
 
 from torch.optim.lr_scheduler import MultiStepLR
 
-sys.path.append('C:/Users/USER/Documents/Programming/ImageRegression')
+# sys.path.append('C:/Users/USER/Documents/Programming/ImageRegression')
 
 from adabound import adabound
 import config.default
@@ -91,18 +91,20 @@ class MetricsManager:
             "n_params": self.n_params
         }, commit=True)
 
-    def log_final_metrics(self):
+    def log_final_metrics(self, final_epoch):
         wandb.log({
-            "Final/epoch": self.epoch,
+            "Final/epoch": self.epoch,  # leave self.epoch here
             "Final/lr": self.lr,
             "Final/loss": self.loss,
             "Final/psnr": self.psnr,
             "Final/ssim": self.ssim,
             "Final/n_params": self.n_params,
             "Final/model(KB)": os.path.getsize(PATH_CHECKPOINT) / 1000,
-            "Final/onnx(KB)": os.path.getsize(PATH_ONNX) / 1000,
-            "image": wandb.Image(f'{OUT_ROOT}/{FOLDER}/sample_{self.epoch}.png'),
-            "image_error": wandb.Image(f'{OUT_ROOT}/{FOLDER}/error_{self.epoch}.png')
+            "Final/onnx(KB)": os.path.getsize(PATH_ONNX) / 1000
+        })
+        wandb.log({
+            "image": wandb.Image(f'{OUT_ROOT}/{FOLDER}/sample_{final_epoch}.png'),
+            "image_error": wandb.Image(f'{OUT_ROOT}/{FOLDER}/error_{final_epoch}.png')
         })
 
 
@@ -179,7 +181,7 @@ def train(model, P, B, image, optimizer, criterion, loss, start_epoch, batches, 
     torch.onnx.export(model, input_mapping(batches[0].to(device), B).float(), PATH_ONNX, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
     if B is not None:
         np.save(PATH_B, B.cpu().numpy())
-    metrics_manager.log_final_metrics()
+    metrics_manager.log_final_metrics(P["epochs"])
     # wandb.save(PATH_ONNX)
     # wandb.save(PATH_B + ".npy")
 
@@ -208,7 +210,7 @@ def main(P):
     # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.01, steps_per_epoch=1, epochs=200, anneal_strategy='linear')
     # scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda e: 0.95 ** e)
     # scheduler2 = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=0.00001)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=P["lr_patience"], factor=.5, verbose=True, cooldown=1000)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=P["lr_patience"], factor=.5, verbose=True, cooldown=0)
 
     start_epoch = 0
     loss = None

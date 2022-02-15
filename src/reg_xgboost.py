@@ -1,10 +1,14 @@
 import argparse
 import os
 import pickle
+import sys
 from datetime import timedelta
 import onnxmltools
 from onnxconverter_common import FloatTensorType
 from xgboost.core import EarlyStopException
+
+# sys.path.append('C:/Users/USER/Documents/Programming/ImageRegression')
+
 import config.default
 from config.default import OUT_ROOT, init_P, INPUT_PATH, hparams_xgboost
 from torchmetrics.functional import ssim
@@ -43,6 +47,11 @@ def metrics_callback(channel):
 
             if psnr >= P["desired_psnr"]:
                 raise EarlyStopException(env.iteration)
+
+            if MAX_MINUTES:
+                if time.time() - start > MAX_MINUTES * 60:
+                    print("Time is up! Closing experiment...")
+                    raise EarlyStopException(env.iteration)
 
     return callback
 
@@ -96,6 +105,7 @@ if __name__ == '__main__':
         if v is not None:
             P[k] = v
 
+    MAX_MINUTES = configargs.max_mins if configargs.max_mins else None
     FOLDER = os.path.join("xgboost", configargs.run_name) if configargs.run_name else os.path.join("xgboost", "unnamed")
     PATH_MODEL = os.path.join(OUT_ROOT, FOLDER, "xgboost_RGBmodels.pkl")
     PATH_ONNX = os.path.join(OUT_ROOT, FOLDER, "xgboost.onnx")
@@ -115,6 +125,8 @@ if __name__ == '__main__':
         WANDB_CFG["name"] = configargs.run_name
         WANDB_CFG["tags"].append("thesis")
 
+    if configargs.input_img:
+        INPUT_PATH = configargs.input_img
     image = cv2.imread(INPUT_PATH)
     image = image_preprocess(image, P)
     cv2.imwrite(os.path.join(OUT_ROOT, FOLDER, 'sample.png'), image.numpy() * 255)
@@ -166,6 +178,9 @@ if __name__ == '__main__':
         img_error = ((img_error - img_error.min()) * 1 / (img_error.max() - img_error.min())).numpy()
         cv2.imwrite(os.path.join(OUT_ROOT, FOLDER, 'xgboost_RGB.png'), pred_img * 255)
         cv2.imwrite(os.path.join(OUT_ROOT, FOLDER, 'xgboost_error.png'), img_error * 255)
+        for channel, prediction in channels_pred.items():
+            channel_image = torch.tensor(prediction).view(h, w, 1).numpy()
+            cv2.imwrite(os.path.join(OUT_ROOT, FOLDER, f'xgboost_{channel}.png'), channel_image * 255)
 
         wandb.log({
             "Final/loss": torch.mean((ypred_RGB - y) ** 2),

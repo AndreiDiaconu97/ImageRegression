@@ -2,6 +2,8 @@ import cv2
 import glob
 import re
 
+# Warning: this is not supposed to work off the shelf, manual tinkering is required
+
 img_array = []
 numbers = re.compile(r'(\d+)')
 # ROOT = 'C:/Users/USER/Documents/Programming/ImageRegression/out/base/sample_*.png'

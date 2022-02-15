@@ -2,7 +2,7 @@ import argparse
 import random
 import sys
 
-sys.path.append('C:/Users/USER/Documents/Programming/ImageRegression')
+# sys.path.append('C:/Users/USER/Documents/Programming/ImageRegression')
 import glob
 import os
 from datetime import timedelta
@@ -12,7 +12,7 @@ from torchmetrics.functional import ssim
 from tqdm import tqdm
 import config.default
 from config.default import OUT_ROOT, device, hparams_grownet, init_P, INPUT_PATH, device_batches, device_image, device_pred_img
-from utils import input_mapping, get_optimizer, batch_generator, get_psnr, image_preprocess, get_model, get_params_num, save_checkpoint, load_checkpoint, get_scaled_image
+from utils import input_mapping, get_optimizer, batch_generator, get_psnr, image_preprocess, get_model, get_params_num, save_checkpoint, load_checkpoint, get_scaled_image, str_to_bool
 from utils.grownet import DynamicNet
 import cv2
 import numpy as np
@@ -30,6 +30,8 @@ def save_ensemble_final(net_ensemble, batches, P, B):
     for i, model in enumerate(net_ensemble.models):
         f_path = f"{PATH_ONNX.removesuffix('net_ensemble.onnx')}weak_{i}.onnx"
         middle_feat, out = net_ensemble.forward(x)
+        if not P["propagate_context"]:
+            middle_feat = None
         input_shape = x if i == 0 else (x, middle_feat)
         torch.onnx.export(model, input_shape, f_path, input_names=["2D"], output_names=["RGB"], dynamic_axes={"2D": {0: "batch_size"}})
     if B is not None:
@@ -150,9 +152,9 @@ class MetricsManager:
 
 def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_grad_weak, criterion, metrics_manager):
     h, w, channels = P["image_shape"]
-    model = get_model(P, stage).to(device)
+    model = get_model(P, stage if P["propagate_context"] else 0).to(device)
     optimizer = get_optimizer(model.parameters(), P["lr_model"], P["optimizer"])
-    scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=P["lr_patience_model"], factor=.1, verbose=False, cooldown=3)
+    scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=P["lr_patience_model"], factor=.5, verbose=False, cooldown=P["lr_cooldown_weak"])
 
     pbar = tqdm(range(P["epochs_per_stage"]), desc=f"[{str(timedelta(seconds=time.time() - start))[:-5]}] Stage {stage + 1}/{P['num_nets']}: weak model training", unit=" epoch")
     for epoch in pbar:
@@ -166,6 +168,9 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
 
             middle_feat, out_ensemble = net_ensemble.forward(x)
             grad_direction = -(out_ensemble - y.to(device))  # grad_direction = y / (1.0 + torch.exp(y * out))
+
+            if not P["propagate_context"]:
+                middle_feat = None
             _, out = model(x, middle_feat)
 
             loss = criterion(net_ensemble.boost_rate * out, grad_direction)
@@ -175,10 +180,10 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
             if not P["acc_gradients"]:
                 optimizer.step()
                 optimizer.zero_grad()
+            scheduler_plateau.step(loss)
         if P["acc_gradients"]:
             optimizer.step()
             optimizer.zero_grad()
-        scheduler_plateau.step(loss)
         # P["lr_model"] = optimizer.param_groups[0]['lr']
 
         loss_epoch = loss_batch_cum / len(batches)
@@ -198,6 +203,8 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
             grad_direction = -(out_ensemble.to(device) - y.to(device))
             img_grad_weak[h_idx, w_idx] = grad_direction.to(device_pred_img)
 
+            if not P["propagate_context"]:
+                middle_feat = None
             _, out = model(x, middle_feat)
             pred_img_weak[h_idx, w_idx] = out.to(device_pred_img)
 
@@ -211,15 +218,11 @@ def train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_gra
     return model
 
 
-def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, lr_ensemble, metrics_manager):
+def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, optimizer, scheduler_plateau, metrics_manager):
     h, w, channels = P["image_shape"]
-    lr_scaler = 1
-    optimizer = get_optimizer([
-        {'params': net_ensemble.parameters()},
-        # {'params': [net_ensemble.boost_rate], 'lr': 2}
-    ], lr_ensemble / lr_scaler, P["optimizer"])
+
+    optimizer.param_groups[0]["params"] = net_ensemble.parameters()  # reinsert updated ensemble parameters
     # optimizer_boost_rate = get_optimizer([net_ensemble.boost_rate], 1e-2, P["optimizer"])
-    scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=P["lr_patience_ensemble"], factor=.1, verbose=False, cooldown=3)
 
     # if stage % 1 == 0:
     #     # lr_scaler *= 2
@@ -245,14 +248,12 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
                 if not P["acc_gradients"]:
                     optimizer.step()
                     optimizer.zero_grad()
-            # optimizer_boost_rate.step()
-            # optimizer_boost_rate.zero_grad()
-
+                    # optimizer_boost_rate.step()
+                    # optimizer_boost_rate.zero_grad()
+                scheduler_plateau.step(loss)
             if P["acc_gradients"]:
                 optimizer.step()
                 optimizer.zero_grad()
-            scheduler_plateau.step(loss)
-            lr_ensemble = optimizer.param_groups[0]['lr']
 
             loss_epoch = loss_batch_cum / len(batches)
             metrics_manager.log_ensemble_epoch(epoch + 1, stage + 1, net_ensemble, loss_epoch, optimizer, pbar)
@@ -274,7 +275,6 @@ def fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_en
             loss_batch_cum += loss.item()
         loss_last_epoch = loss_batch_cum / len(batches)
         metrics_manager.log_ensemble_stage(P, stage + 1, loss_last_epoch, image, pred_img_ensemble, net_ensemble)
-    return lr_ensemble
 
 
 def train(net_ensemble, P, B, image, criterion, start_stage, batches):
@@ -286,14 +286,20 @@ def train(net_ensemble, P, B, image, criterion, start_stage, batches):
     pred_img_weak = torch.Tensor(np.empty(shape=(h, w, channels))).to(device_pred_img)
     pred_img_ensemble = torch.Tensor(np.empty(shape=(h, w, channels))).to(device_pred_img)
 
+    lr_scaler = 1
+    ens_optimizer = get_optimizer([
+        {'params': net_ensemble.parameters()},
+        # {'params': [net_ensemble.boost_rate], 'lr': 2}
+    ], P["lr_ensemble"] / lr_scaler, P["optimizer"])
+    ens_scheduler_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(ens_optimizer, patience=P["lr_patience_ensemble"], factor=.5, verbose=False, cooldown=P["lr_cooldown_ensemble"])
+
     # train new model and append to ensemble
-    lr_ensemble = P["lr_ensemble"]
     for stage in range(start_stage, P["num_nets"]):
         weak_model = train_weak(stage, P, B, net_ensemble, batches, image, pred_img_weak, img_grad_weak, criterion, metrics_manager)
         net_ensemble.add(weak_model)
 
         if stage > 0:
-            lr_ensemble = fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, lr_ensemble, metrics_manager)
+            fully_corrective_step(stage, P, B, net_ensemble, batches, image, pred_img_ensemble, criterion, ens_optimizer, ens_scheduler_plateau, metrics_manager)
         if save_checkpoints:
             save_checkpoint(PATH_CHECKPOINT, net_ensemble, None, None, stage + 1, B, P)
             if os.path.isfile(PATH_CHECKPOINT):
@@ -330,7 +336,7 @@ def main(P):
             c0 = torch.mean(image, dim=[0, 1]).to(device)
         else:
             c0 = torch.Tensor([0.0, 0.0, 0.0]).to(device)
-        net_ensemble = DynamicNet(c0, P["boost_rate"])
+        net_ensemble = DynamicNet(c0, P["boost_rate"], P["propagate_context"], P["enable_boost_rate"])
         criterion = nn.MSELoss()
 
         start_stage = 0
@@ -373,11 +379,11 @@ if __name__ == '__main__':
                         help="Random Fourier features scaler, set to 0 to disable fourier features")
     parser.add_argument("--w0", type=int,
                         help="Siren scaler factor, ignored if using ReLU")
-    parser.add_argument("--acc_gradients", type=bool,
+    parser.add_argument("--acc_gradients", type=str_to_bool,
                         help="accumulate gradient for all batches before gradient descent")
     parser.add_argument("--batch_sampling_mode", type=str,
                         help="options: [sequence, nth_element, whole]")
-    parser.add_argument("--shuffle_batches", type=bool,
+    parser.add_argument("--shuffle_batches", type=str_to_bool,
                         help="better leaving True")
     parser.add_argument("--batch_size", type=int,
                         help="best around 5000-20000")
@@ -395,6 +401,14 @@ if __name__ == '__main__':
                         help="learning rate during fully-corrective phase")
     parser.add_argument("--lr_model", type=float,
                         help="learning rate during weak model training")
+    parser.add_argument("--lr_patience_model", type=int,
+                        help="Number of batches to wait for the weak learner before dropping the learning rate.")
+    parser.add_argument("--lr_patience_ensemble", type=int,
+                        help="Number of batches to wait for the corrective phase before dropping the learning rate.")
+    parser.add_argument("--lr_cooldown_weak", type=int,
+                        help="Cooldown before re-enabling plateau scheduler for the weak learner")
+    parser.add_argument("--lr_cooldown_ensemble", type=int,
+                        help="Cooldown before re-enabling plateau scheduler for the corrective phase")
     parser.add_argument("--model", type=str,
                         help="options: [relu, siren]")
     parser.add_argument("--num_nets", type=int,
@@ -403,6 +417,10 @@ if __name__ == '__main__':
                         help="options: [adam, adamW, RMSprop, SGD]")
     parser.add_argument("--scale", type=float,
                         help="online image resizing factor")
+    parser.add_argument("--propagate_context", type=str_to_bool,
+                        help="Choose if appending the penultimate layer to the next learner.")
+    parser.add_argument("--enable_boost_rate", type=str_to_bool,
+                        help="Choose if learning the boost rate, otherwise is left to 1.")
 
     configargs = parser.parse_args()
 
