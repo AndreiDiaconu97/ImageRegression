@@ -1,5 +1,5 @@
 # ImageRegression
-![anim.gif](.assets\anim.gif)
+![anim.gif](https://github.com/AndreiDiaconu97/ImageRegression/blob/2ca403710267d46ecbd6a835c6dcb0075b4d4f51/.assets/anim.gif)
 
 Preliminary studies during my MSCS thesis on boosting Neural Radiance Fields. This served as pratice with PyTorch by implementing and debugging a toy problem that is a coordinate-based image regression model.
 
